@@ -1,3 +1,5 @@
+![Open Web Id](https://github.com/SWAN-community/owid/raw/main/images/owl.128.pxls.100.dpi.png)
+
 # OWID
 
 Simple cryptographically auditable identifiers and processors implemented in
