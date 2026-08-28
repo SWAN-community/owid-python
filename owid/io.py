@@ -79,9 +79,25 @@ class Reader:
         return struct.unpack("<I", self.read_bytes(4))[0]
 
     def read_byte_array(self) -> bytes:
-        """Reads a byte array prefixed with its length as an unsigned 32 bit
-        integer."""
+        """Reads the payload, being a byte array prefixed with its length as
+        an unsigned 32 bit integer.
+
+        The length is whatever the sender declared, so it is checked against
+        the bytes actually present before anything is sized by it. A valid
+        OWID is the declared payload followed by the signature and nothing
+        else, so the length must equal the bytes remaining less the signature
+        length, and any other length, short or long, is refused here. The
+        same check refuses a signature shorter than 64 bytes and any byte
+        after the signature, which until 28 August 2026 this reader ignored.
+        """
         count = self.read_u32()
+        remaining = len(self._buffer) - self._position
+        if remaining != count + SIGNATURE_LENGTH:
+            raise OwidError(
+                "OWID payload length '{0}' does not match the '{1}' bytes "
+                "present, of which the final '{2}' must be the "
+                "signature".format(count, remaining, SIGNATURE_LENGTH)
+            )
         return self.read_bytes(count)
 
     def read_signature(self) -> bytes:
