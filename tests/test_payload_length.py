@@ -65,6 +65,16 @@ class PayloadLengthTests(unittest.TestCase):
         self.assertEqual(owid.signature, SIGNATURE)
         self.assertEqual(owid.domain, DOMAIN)
 
+    def test_matching_one_mebibyte_payload_parses(self) -> None:
+        """A matching large payload is valid; size policy belongs upstream."""
+        payload = b"\x5a" * (1024 * 1024)
+
+        owid = Owid.from_byte_array(
+            envelope(len(payload), payload, SIGNATURE)
+        )
+
+        self.assertEqual(owid.payload, payload)
+
     def test_library_output_parses(self) -> None:
         """A round trip through the library's own signing path and writer
         still parses, so the check agrees with what the library itself
@@ -108,11 +118,15 @@ class PayloadLengthTests(unittest.TestCase):
                 envelope(len(PAYLOAD), PAYLOAD, SIGNATURE[:-1])
             )
 
-    def test_huge_declared_length_is_refused_without_allocating(self) -> None:
-        """A declared length far beyond the bytes present is refused without
-        an allocation sized by the declared number. The envelope is a few
-        dozen bytes and declares 64 MiB, then 2 GiB, then the largest value
-        the field can hold. Python cannot ask for the bytes allocated by
+    def test_mismatched_large_declaration_is_refused_without_allocating(
+        self,
+    ) -> None:
+        """A large declaration whose payload bytes are absent is cheap.
+
+        The envelope is a few dozen bytes while declaring 64 MiB, then 2 GiB,
+        then the largest value the field can hold. The numeric values remain
+        valid when the matching payload is present. Python cannot ask for
+        the bytes allocated by
         the thread the way the .NET reference does, so two checks stand
         in. A loop of 1,000 parses must finish in under a second, which
         fails if each parse allocates the declared size, and tracemalloc

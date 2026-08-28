@@ -63,20 +63,23 @@ class Reader:
 
     def read_string(self) -> str:
         """Reads bytes up to the null terminator and decodes them as UTF-8."""
-        remaining = self._buffer[self._position:]
-        terminator = remaining.find(0)
+        terminator = self._buffer.find(b"\0", self._position)
         if terminator < 0:
             raise OwidError("buffer ended before the OWID was complete")
         try:
-            value = remaining[:terminator].decode("utf-8")
+            value = self._buffer[self._position:terminator].decode("utf-8")
         except UnicodeDecodeError:
             raise OwidError("domain bytes are not valid UTF-8")
-        self._position += terminator + 1
+        self._position = terminator + 1
         return value
 
     def read_u32(self) -> int:
         """Reads an unsigned 32 bit little endian integer."""
-        return struct.unpack("<I", self.read_bytes(4))[0]
+        if self._position + 4 > len(self._buffer):
+            raise OwidError("buffer ended before the OWID was complete")
+        value = struct.unpack_from("<I", self._buffer, self._position)[0]
+        self._position += 4
+        return value
 
     def read_byte_array(self) -> bytes:
         """Reads the payload, being a byte array prefixed with its length as

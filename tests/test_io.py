@@ -119,6 +119,12 @@ class IoTests(unittest.TestCase):
         with self.assertRaises(OwidError):
             reader.read_string()
 
+    def test_string_scan_does_not_depend_on_the_payload_size(self) -> None:
+        payload = b"x" * (1024 * 1024)
+        reader = io.Reader(b"example.com\0" + payload)
+        self.assertEqual(reader.read_string(), "example.com")
+        self.assertEqual(reader.read_bytes(len(payload)), payload)
+
 
 if __name__ == "__main__":
     unittest.main()
