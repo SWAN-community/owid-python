@@ -90,12 +90,12 @@ class DomainLengthTests(unittest.TestCase):
         trips through the writer and the reader unchanged."""
         self.assertEqual(len(MAXIMUM_DOMAIN), MAXIMUM_DOMAIN_LENGTH)
 
-        owid = Owid.from_byte_array(envelope(terminated(MAXIMUM_DOMAIN)))
+        owid = Owid._from_byte_array_or_raise(envelope(terminated(MAXIMUM_DOMAIN)))
 
         self.assertEqual(owid.domain, MAXIMUM_DOMAIN)
         self.assertEqual(owid.payload, PAYLOAD)
         self.assertEqual(owid.signature, SIGNATURE)
-        again = Owid.from_byte_array(owid.as_byte_array())
+        again = Owid._from_byte_array_or_raise(owid.as_byte_array())
         self.assertEqual(again.domain, MAXIMUM_DOMAIN)
         self.assertEqual(again, owid)
 
@@ -107,7 +107,7 @@ class DomainLengthTests(unittest.TestCase):
         self.assertEqual(len(domain), MAXIMUM_DOMAIN_LENGTH + 1)
 
         with self.assertRaises(OwidError) as raised:
-            Owid.from_byte_array(envelope(terminated(domain)))
+            Owid._from_byte_array_or_raise(envelope(terminated(domain)))
 
         self.assertIn(
             "'{0}'".format(MAXIMUM_DOMAIN_LENGTH), str(raised.exception)
@@ -127,7 +127,7 @@ class DomainLengthTests(unittest.TestCase):
         started = time.perf_counter()
         for _ in range(1000):
             with self.assertRaises(OwidError):
-                Owid.from_byte_array(raw)
+                Owid._from_byte_array_or_raise(raw)
         elapsed = time.perf_counter() - started
 
         self.assertLess(
@@ -140,7 +140,7 @@ class DomainLengthTests(unittest.TestCase):
         tracemalloc.start()
         try:
             with self.assertRaises(OwidError):
-                Owid.from_byte_array(raw)
+                Owid._from_byte_array_or_raise(raw)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -164,7 +164,7 @@ class DomainLengthTests(unittest.TestCase):
         tracemalloc.start()
         try:
             with self.assertRaises(OwidError):
-                Owid.from_byte_array(raw)
+                Owid._from_byte_array_or_raise(raw)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -180,9 +180,9 @@ class DomainLengthTests(unittest.TestCase):
         still parses and still verifies, so the bound refuses nothing the
         library itself produces."""
         crypto = Crypto.new()
-        original = Creator(MAXIMUM_DOMAIN, crypto).sign_bytes(PAYLOAD)
+        original = Creator(MAXIMUM_DOMAIN, crypto).create(PAYLOAD)
 
-        parsed = Owid.from_byte_array(original.as_byte_array())
+        parsed = Owid._from_byte_array_or_raise(original.as_byte_array())
 
         self.assertEqual(parsed.domain, MAXIMUM_DOMAIN)
         self.assertEqual(parsed, original)
@@ -215,14 +215,14 @@ class DomainLengthWriteTests(unittest.TestCase):
         """A domain of exactly the maximum length is written and the value
         parses back unchanged, so the bound refuses nothing at or under the
         maximum."""
-        owid = Owid(
+        owid = Owid._create(
             version=Version.VERSION3,
             domain=MAXIMUM_DOMAIN,
             payload=PAYLOAD,
             signature=SIGNATURE,
         )
 
-        parsed = Owid.from_byte_array(owid.as_byte_array())
+        parsed = Owid._from_byte_array_or_raise(owid.as_byte_array())
 
         self.assertEqual(parsed.domain, MAXIMUM_DOMAIN)
         self.assertEqual(parsed.payload, PAYLOAD)
@@ -257,7 +257,7 @@ class DomainLengthWriteTests(unittest.TestCase):
         on the OWID directly, is refused when it is serialised, so the
         library never emits an OWID it would refuse to read."""
         domain = MAXIMUM_DOMAIN + "c"
-        owid = Owid(
+        owid = Owid._create(
             version=Version.VERSION3,
             domain=domain,
             payload=PAYLOAD,
@@ -280,7 +280,7 @@ class DomainLengthWriteTests(unittest.TestCase):
         refused without the counter moving again."""
         counting = CountingCrypto(Crypto.new())
 
-        Creator(MAXIMUM_DOMAIN, counting).sign_bytes(PAYLOAD)
+        Creator(MAXIMUM_DOMAIN, counting).create(PAYLOAD)
         self.assertEqual(counting.sign_calls, 1)
 
         with self.assertRaises(OwidError):

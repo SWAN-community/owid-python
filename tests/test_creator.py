@@ -26,7 +26,7 @@ class CreatorTests(unittest.TestCase):
     def test_sign_sets_domain_date_and_version(self) -> None:
         crypto = Crypto.new()
         creator = Creator("example.com", crypto)
-        owid = creator.sign_string("Hello World")
+        owid = creator.create_string("Hello World")
         self.assertEqual(owid.domain, "example.com")
         self.assertEqual(owid.version, Version.VERSION3)
         self.assertEqual(len(owid.signature), 64)
@@ -35,8 +35,8 @@ class CreatorTests(unittest.TestCase):
     def test_sign_string_and_sign_bytes_match(self) -> None:
         crypto = Crypto.new()
         creator = Creator("example.com", crypto)
-        from_string = creator.sign_string("payload")
-        from_bytes = creator.sign_bytes(b"payload")
+        from_string = creator.create_string("payload")
+        from_bytes = creator.create(b"payload")
         self.assertEqual(from_string.payload, from_bytes.payload)
 
     def test_empty_domain_raises(self) -> None:
@@ -61,7 +61,7 @@ class CreatorTests(unittest.TestCase):
         )
         creator = Creator.from_configuration(configuration)
         self.assertEqual(creator.domain, "example.com")
-        owid = creator.sign_string("Hello World")
+        owid = creator.create_string("Hello World")
         # The OWID must verify with the public key from the original crypto.
         self.assertTrue(owid.verify_with_public_key(crypto.public_key_pem(), []))
 

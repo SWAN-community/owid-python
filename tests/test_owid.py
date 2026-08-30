@@ -19,9 +19,16 @@ from __future__ import annotations
 
 import unittest
 
+from owid.io import SIGNATURE_LENGTH
 from owid import Crypto, Owid, Version
 
 from tests import fixtures
+
+
+def _parsed(result):
+    """The OWID from a result a test has already decided is valid."""
+    assert result.ok, "expected valid input, got {0}".format(result.status)
+    return result.owid
 
 
 class CanonicalWireVectorTests(unittest.TestCase):
@@ -34,7 +41,7 @@ class CanonicalWireVectorTests(unittest.TestCase):
 
     def _assert_round_trip(self, vector: str) -> Owid:
         original = fixtures.decode_unpadded(vector)
-        owid = Owid.from_byte_array(original)
+        owid = Owid._from_byte_array_or_raise(original)
         self.assertEqual(
             owid.as_byte_array(),
             original,
@@ -83,11 +90,11 @@ class CrossLanguageFixtureTests(unittest.TestCase):
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
             with self.subTest(language=name, fixture="simple"):
-                simple = Owid.from_base64(data["simple"])
+                simple = _parsed(Owid.try_from_base64(data["simple"]))
                 self.assertEqual(simple.payload_as_string(), "example")
                 self.assertTrue(simple.verify_with_public_key(spki, []))
             with self.subTest(language=name, fixture="utf8"):
-                utf8 = Owid.from_base64(data["utf8"])
+                utf8 = _parsed(Owid.try_from_base64(data["utf8"]))
                 self.assertEqual(
                     utf8.payload_as_string(),
                     fixtures.UTF8_PAYLOAD,
@@ -98,8 +105,8 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_chain_verifies_with_root_as_other(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            root = Owid.from_base64(data["chain_root"])
-            party = Owid.from_base64(data["chain_party"])
+            root = _parsed(Owid.try_from_base64(data["chain_root"]))
+            party = _parsed(Owid.try_from_base64(data["chain_party"]))
             with self.subTest(language=name):
                 self.assertEqual(root.payload_as_string(), "root")
                 self.assertEqual(party.payload_as_string(), "party")
@@ -111,7 +118,7 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_chain_party_fails_without_others(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            party = Owid.from_base64(data["chain_party"])
+            party = _parsed(Owid.try_from_base64(data["chain_party"]))
             with self.subTest(language=name):
                 self.assertFalse(
                     party.verify_with_public_key(spki, []),
@@ -121,19 +128,19 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_tampered_fixtures_fail(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            root = Owid.from_base64(data["chain_root"])
+            root = _parsed(Owid.try_from_base64(data["chain_root"]))
             for fixture in ("simple", "utf8", "chain_root"):
                 with self.subTest(language=name, fixture=fixture):
-                    tampered = Owid.from_base64(
-                        fixtures.flip_last_byte(data[fixture])
+                    tampered = _parsed(Owid.try_from_base64(
+                        fixtures.flip_last_byte(data[fixture]))
                     )
                     self.assertFalse(
                         tampered.verify_with_public_key(spki, []),
                         "a flipped signature byte must fail to verify",
                     )
             with self.subTest(language=name, fixture="chain_party"):
-                tampered_party = Owid.from_base64(
-                    fixtures.flip_last_byte(data["chain_party"])
+                tampered_party = _parsed(Owid.try_from_base64(
+                    fixtures.flip_last_byte(data["chain_party"]))
                 )
                 self.assertFalse(
                     tampered_party.verify_with_public_key(spki, [root]),
@@ -149,12 +156,12 @@ class SignAndSelfVerifyTests(unittest.TestCase):
 
         crypto = Crypto.new()
         creator = Creator("example.com", crypto)
-        owid = creator.sign_string("Hello World")
+        owid = creator.create_string("Hello World")
         # Verifies with the crypto instance and with the exported public key.
         self.assertTrue(owid.verify_with_crypto(crypto, []))
         self.assertTrue(owid.verify_with_public_key(crypto.public_key_pem(), []))
         # A copy decoded from base 64 also verifies.
-        copy = Owid.from_base64(owid.as_base64())
+        copy = _parsed(Owid.try_from_base64(owid.as_base64()))
         self.assertEqual(copy, owid)
         self.assertTrue(copy.verify_with_crypto(crypto, []))
 
@@ -163,19 +170,29 @@ class SignAndSelfVerifyTests(unittest.TestCase):
 
         crypto = Crypto.new()
         creator = Creator("example.com", crypto)
-        owid = creator.sign_string("Hello World")
-        # Change a payload byte and verification must fail.
-        owid.payload = b"Hello Worle"
-        self.assertFalse(owid.verify_with_crypto(crypto, []))
+        owid = creator.create_string("Hello World")
+        # Tampering happens to the bytes in transit, not to an object already
+        # in memory, and it can no longer be done in memory because the fields
+        # are read only. So the envelope is serialised, a payload byte is
+        # changed, and the result is read back the way a receiver would read
+        # it.
+        raw = bytearray(owid.as_byte_array())
+        at = len(raw) - SIGNATURE_LENGTH - len(owid.payload)
+        raw[at] ^= 0xFF
+        result = Owid.try_from_byte_array(bytes(raw))
+        self.assertTrue(result.ok, result.status)
+        self.assertFalse(result.owid.verify_with_crypto(crypto, []))
 
     def test_sign_with_others_round_trip(self) -> None:
         from owid import Creator
 
         crypto = Crypto.new()
         creator = Creator("example.com", crypto)
-        root = creator.sign_string("root")
-        party = Owid(payload=b"party")
-        creator.sign_with_others(party, [root])
+        root = creator.create_string("root")
+        # Created with the root as the other it is signed alongside, rather
+        # than assembled and then signed, because a caller no longer makes an
+        # OWID and hands it over to have a signature put on it.
+        party = creator.create(b"party", [root])
         # Party verifies with the root as the single other, and fails alone.
         self.assertTrue(party.verify_with_crypto(crypto, [root]))
         self.assertFalse(party.verify_with_crypto(crypto, []))
@@ -185,10 +202,10 @@ class PayloadAndSerializationTests(unittest.TestCase):
     """Payload accessors and the empty OWID marker."""
 
     def test_payload_accessors(self) -> None:
-        owid = Owid(payload=bytes([0x01, 0x03]))
+        owid = Owid._create(payload=bytes([0x01, 0x03]))
         self.assertEqual(owid.payload_as_printable(), "0103")
         self.assertEqual(owid.payload_as_base64(), "AQM=")
-        self.assertEqual(Owid(payload=b"example").payload_as_string(), "example")
+        self.assertEqual(Owid._create(payload=b"example").payload_as_string(), "example")
 
     def test_unpadded_and_padded_decode(self) -> None:
         # The supplier vector is unpadded. Adding padding must decode to the
@@ -196,21 +213,21 @@ class PayloadAndSerializationTests(unittest.TestCase):
         unpadded = fixtures.SUPPLIER_VECTOR
         padded = unpadded + "="
         self.assertEqual(
-            Owid.from_base64(unpadded), Owid.from_base64(padded)
+            _parsed(Owid.try_from_base64(unpadded)), _parsed(Owid.try_from_base64(padded))
         )
 
     def test_empty_marker(self) -> None:
         buffer = bytearray()
         Owid.empty_to_buffer(buffer)
         self.assertEqual(bytes(buffer), bytes([0]))
-        owid = Owid.from_byte_array(bytes(buffer))
+        owid = Owid._from_byte_array_or_raise(bytes(buffer))
         self.assertEqual(owid.version, Version.EMPTY)
 
     def test_short_buffer_raises(self) -> None:
         from owid import OwidError
 
         with self.assertRaises(OwidError):
-            Owid.from_byte_array(bytes([0x03, 0x61]))
+            Owid._from_byte_array_or_raise(bytes([0x03, 0x61]))
 
 
 if __name__ == "__main__":

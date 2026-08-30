@@ -58,7 +58,7 @@ class PayloadLengthTests(unittest.TestCase):
     def test_declared_length_matches_parses(self) -> None:
         """The declared length matches the bytes present, the signature is
         the last 64 bytes, and the envelope parses to the same payload."""
-        owid = Owid.from_byte_array(
+        owid = Owid._from_byte_array_or_raise(
             envelope(len(PAYLOAD), PAYLOAD, SIGNATURE)
         )
         self.assertEqual(owid.payload, PAYLOAD)
@@ -69,7 +69,7 @@ class PayloadLengthTests(unittest.TestCase):
         """A matching large payload is valid; size policy belongs upstream."""
         payload = b"\x5a" * (1024 * 1024)
 
-        owid = Owid.from_byte_array(
+        owid = Owid._from_byte_array_or_raise(
             envelope(len(payload), payload, SIGNATURE)
         )
 
@@ -80,8 +80,8 @@ class PayloadLengthTests(unittest.TestCase):
         still parses, so the check agrees with what the library itself
         produces."""
         crypto = Crypto.new()
-        original = Creator(DOMAIN, crypto).sign_bytes(PAYLOAD)
-        parsed = Owid.from_byte_array(original.as_byte_array())
+        original = Creator(DOMAIN, crypto).create(PAYLOAD)
+        parsed = Owid._from_byte_array_or_raise(original.as_byte_array())
         self.assertEqual(parsed.payload, PAYLOAD)
         self.assertEqual(parsed, original)
         self.assertTrue(parsed.verify_with_crypto(crypto, []))
@@ -95,7 +95,7 @@ class PayloadLengthTests(unittest.TestCase):
         for declared in (len(PAYLOAD) - 1, len(PAYLOAD) + 1):
             with self.subTest(declared=declared):
                 with self.assertRaises(OwidError) as raised:
-                    Owid.from_byte_array(
+                    Owid._from_byte_array_or_raise(
                         envelope(declared, PAYLOAD, SIGNATURE)
                     )
                 message = str(raised.exception)
@@ -107,14 +107,14 @@ class PayloadLengthTests(unittest.TestCase):
         must be the end of the envelope."""
         longer = envelope(len(PAYLOAD), PAYLOAD, SIGNATURE) + b"\x00"
         with self.assertRaises(OwidError):
-            Owid.from_byte_array(longer)
+            Owid._from_byte_array_or_raise(longer)
 
     def test_short_signature_is_refused(self) -> None:
         """A short signature is refused. The declared payload length is
         right for the payload, but the bytes after it are fewer than a
         signature."""
         with self.assertRaises(OwidError):
-            Owid.from_byte_array(
+            Owid._from_byte_array_or_raise(
                 envelope(len(PAYLOAD), PAYLOAD, SIGNATURE[:-1])
             )
 
@@ -137,7 +137,7 @@ class PayloadLengthTests(unittest.TestCase):
                 started = time.perf_counter()
                 for _ in range(1000):
                     with self.assertRaises(OwidError):
-                        Owid.from_byte_array(raw)
+                        Owid._from_byte_array_or_raise(raw)
                 elapsed = time.perf_counter() - started
                 self.assertLess(
                     elapsed,
@@ -149,7 +149,7 @@ class PayloadLengthTests(unittest.TestCase):
                 tracemalloc.start()
                 try:
                     with self.assertRaises(OwidError):
-                        Owid.from_byte_array(raw)
+                        Owid._from_byte_array_or_raise(raw)
                     _, peak = tracemalloc.get_traced_memory()
                 finally:
                     tracemalloc.stop()
@@ -164,7 +164,7 @@ class PayloadLengthTests(unittest.TestCase):
     def test_empty_payload_parses(self) -> None:
         """A declared length of zero followed by the 64 byte signature
         parses, so the check does not refuse the smallest valid payload."""
-        owid = Owid.from_byte_array(envelope(0, b"", SIGNATURE))
+        owid = Owid._from_byte_array_or_raise(envelope(0, b"", SIGNATURE))
         self.assertEqual(owid.payload, b"")
         self.assertEqual(owid.signature, SIGNATURE)
 
