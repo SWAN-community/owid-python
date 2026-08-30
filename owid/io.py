@@ -36,6 +36,15 @@ SIGNATURE_LENGTH = 64
 #: number of hours or minutes after this instant.
 BASE_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
+#: The longest creator domain the reader will accept, in characters. RFC 1035
+#: section 2.3.4, "Size limits", restricts the total length of a domain name,
+#: being the label octets and the label length octets, to 255 octets or less.
+#: An OWID stores the presentation form, the text "example.com", where the
+#: dots stand in for the label length octets and the root label has no text at
+#: all, so two of those 255 octets have no text equivalent and the limit on
+#: the text is two fewer. A domain is ASCII, so a character is a byte here.
+MAXIMUM_DOMAIN_LENGTH = 255 - 2
+
 
 class Reader:
     """Sequential reader over a byte buffer."""
@@ -62,10 +71,26 @@ class Reader:
         return value
 
     def read_string(self) -> str:
-        """Reads bytes up to the null terminator and decodes them as UTF-8."""
-        terminator = self._buffer.find(b"\0", self._position)
+        """Reads bytes up to the null terminator and decodes them as UTF-8.
+
+        The only null terminated string in an OWID is the creator domain, and
+        a domain has a published maximum length, so the search for the
+        terminator stops after MAXIMUM_DOMAIN_LENGTH bytes rather than running
+        to the end of the buffer. A buffer whose terminator is missing or
+        corrupted is refused as soon as that window is exhausted, so the work
+        a hostile buffer can ask for is fixed by the constant rather than
+        growing with the length of the input.
+        """
+        window_end = self._position + MAXIMUM_DOMAIN_LENGTH + 1
+        terminator = self._buffer.find(b"\0", self._position, window_end)
         if terminator < 0:
-            raise OwidError("buffer ended before the OWID was complete")
+            if len(self._buffer) < window_end:
+                raise OwidError("buffer ended before the OWID was complete")
+            raise OwidError(
+                "domain is longer than the '{0}' character maximum".format(
+                    MAXIMUM_DOMAIN_LENGTH
+                )
+            )
         try:
             value = self._buffer[self._position:terminator].decode("utf-8")
         except UnicodeDecodeError:

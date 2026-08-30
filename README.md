@@ -32,15 +32,23 @@ deprecated and are supported for reading existing data only.
 
 The OWID wire format stores the payload length as an unsigned 32 bit value,
 so a payload from zero through 4,294,967,295 bytes is structurally valid. The
-format defines no smaller payload limit. The null-terminated domain has no
-separate encoded maximum, so the protocol alone is not an application input
-limit for the complete envelope.
+format defines no smaller payload limit. The null-terminated domain carries
+no length of its own, so the protocol alone is not an application input limit
+for the complete envelope.
 
 This package validates that the declared payload length agrees with the bytes
 present before it sizes or copies the payload. A large declaration without
 the corresponding bytes is malformed and is rejected without allocating the
 declared size. A matching large payload is not malformed merely because it is
 large, and parsing work and memory use scale with the bytes actually present.
+
+The domain ends at a zero terminator rather than at a declared length, so a
+buffer whose terminator is missing or corrupted would otherwise be walked to
+its end. This package stops that walk at `MAXIMUM_DOMAIN_LENGTH`, which
+`owid/io.py` derives from the size limit in RFC 1035 section 2.3.4, and
+refuses the buffer there. The cost of a domain field an attacker sized is
+therefore fixed by that constant rather than by the length of the input, and
+no domain a name server would accept is affected.
 
 The in-memory APIs remain subject to Python object, address-space and
 available-memory limits. Applications accepting untrusted OWIDs must choose
