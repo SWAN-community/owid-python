@@ -95,7 +95,7 @@ class Owid:
         if _token is not _INTERNAL:
             raise OwidError(
                 "an OWID cannot be constructed directly. Use "
-                "Owid.try_from_base64 or Owid.try_from_byte_array to read "
+                "Owid.parse or Owid.parse_bytes to read "
                 "one, or Creator.create to sign a new one"
             )
         self._version = version
@@ -154,20 +154,21 @@ class Owid:
         )
 
     @classmethod
-    def try_from_base64(cls, value) -> "ParseResult":
+    def parse(cls, value) -> "ParseResult":
         """Reads a complete OWID from its base 64 form.
 
         Returns a result that is truthy on success and carries the OWID only
-        then, with a named reason either way. Malformed input is an ordinary
-        outcome here rather than an exception, because the data comes from
-        outside and whoever sends it chooses how often it is wrong.
+        then, with a named reason either way, so ``if result:`` reads the way
+        Python reads. Malformed input is an ordinary outcome rather than an
+        exception, because the data comes from outside and whoever sends it
+        chooses how often it is wrong.
         """
         from .parse import parse_base64
 
         return parse_base64(value)
 
     @classmethod
-    def try_from_byte_array(cls, buffer) -> "ParseResult":
+    def parse_bytes(cls, buffer) -> "ParseResult":
         """Reads a complete OWID from a buffer holding exactly one."""
         from .parse import parse_bytes
 
@@ -298,6 +299,43 @@ class Owid:
         signed, using the public key in SPKI PEM form provided."""
         crypto = Crypto.new_verify_only(public_pem)
         return self.verify_with_crypto(crypto, others)
+
+    def signature_status(
+        self, public_pem: str, others: Optional[Sequence["Owid"]] = None
+    ) -> "SignatureStatus":
+        """Says whether the signature is genuine, or why that could not be
+        decided.
+
+        Only two of the answers are about the signature. The rest say the
+        question could not be answered, which is a different thing and must
+        never be reported as a forgery. A key that cannot be decoded leaves the
+        signature unjudged, and a caller acting on "invalid" would reject good
+        identifiers during an outage. On 30 August 2026 the key endpoints
+        served PEM a strict parser rejects and every offline verification
+        failed, with the keys and the identifiers both fine.
+        """
+        from .status import SignatureStatus
+
+        if not public_pem:
+            return SignatureStatus.KEY_UNAVAILABLE
+        if len(self._signature) != io.SIGNATURE_LENGTH:
+            return SignatureStatus.INVALID_SIGNATURE_LENGTH
+        try:
+            crypto = Crypto.new_verify_only(public_pem)
+        except Exception:
+            # The key is the thing at fault, not the identifier.
+            return SignatureStatus.INVALID_KEY
+        try:
+            data = self.data_for_crypto(others if others is not None else [])
+            matched = crypto.verify_byte_array(data, self._signature)
+        except Exception:
+            # The provider failed on inputs that were themselves fine.
+            return SignatureStatus.VERIFICATION_ERROR
+        return (
+            SignatureStatus.SIGNATURE_VALID
+            if matched
+            else SignatureStatus.SIGNATURE_INVALID
+        )
 
     def __str__(self) -> str:
         """Formats the OWID as a base 64 string."""

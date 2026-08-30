@@ -90,11 +90,11 @@ class CrossLanguageFixtureTests(unittest.TestCase):
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
             with self.subTest(language=name, fixture="simple"):
-                simple = _parsed(Owid.try_from_base64(data["simple"]))
+                simple = _parsed(Owid.parse(data["simple"]))
                 self.assertEqual(simple.payload_as_string(), "example")
                 self.assertTrue(simple.verify_with_public_key(spki, []))
             with self.subTest(language=name, fixture="utf8"):
-                utf8 = _parsed(Owid.try_from_base64(data["utf8"]))
+                utf8 = _parsed(Owid.parse(data["utf8"]))
                 self.assertEqual(
                     utf8.payload_as_string(),
                     fixtures.UTF8_PAYLOAD,
@@ -105,8 +105,8 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_chain_verifies_with_root_as_other(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            root = _parsed(Owid.try_from_base64(data["chain_root"]))
-            party = _parsed(Owid.try_from_base64(data["chain_party"]))
+            root = _parsed(Owid.parse(data["chain_root"]))
+            party = _parsed(Owid.parse(data["chain_party"]))
             with self.subTest(language=name):
                 self.assertEqual(root.payload_as_string(), "root")
                 self.assertEqual(party.payload_as_string(), "party")
@@ -118,7 +118,7 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_chain_party_fails_without_others(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            party = _parsed(Owid.try_from_base64(data["chain_party"]))
+            party = _parsed(Owid.parse(data["chain_party"]))
             with self.subTest(language=name):
                 self.assertFalse(
                     party.verify_with_public_key(spki, []),
@@ -128,10 +128,10 @@ class CrossLanguageFixtureTests(unittest.TestCase):
     def test_tampered_fixtures_fail(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            root = _parsed(Owid.try_from_base64(data["chain_root"]))
+            root = _parsed(Owid.parse(data["chain_root"]))
             for fixture in ("simple", "utf8", "chain_root"):
                 with self.subTest(language=name, fixture=fixture):
-                    tampered = _parsed(Owid.try_from_base64(
+                    tampered = _parsed(Owid.parse(
                         fixtures.flip_last_byte(data[fixture]))
                     )
                     self.assertFalse(
@@ -139,7 +139,7 @@ class CrossLanguageFixtureTests(unittest.TestCase):
                         "a flipped signature byte must fail to verify",
                     )
             with self.subTest(language=name, fixture="chain_party"):
-                tampered_party = _parsed(Owid.try_from_base64(
+                tampered_party = _parsed(Owid.parse(
                     fixtures.flip_last_byte(data["chain_party"]))
                 )
                 self.assertFalse(
@@ -161,7 +161,7 @@ class SignAndSelfVerifyTests(unittest.TestCase):
         self.assertTrue(owid.verify_with_crypto(crypto, []))
         self.assertTrue(owid.verify_with_public_key(crypto.public_key_pem(), []))
         # A copy decoded from base 64 also verifies.
-        copy = _parsed(Owid.try_from_base64(owid.as_base64()))
+        copy = _parsed(Owid.parse(owid.as_base64()))
         self.assertEqual(copy, owid)
         self.assertTrue(copy.verify_with_crypto(crypto, []))
 
@@ -179,7 +179,7 @@ class SignAndSelfVerifyTests(unittest.TestCase):
         raw = bytearray(owid.as_byte_array())
         at = len(raw) - SIGNATURE_LENGTH - len(owid.payload)
         raw[at] ^= 0xFF
-        result = Owid.try_from_byte_array(bytes(raw))
+        result = Owid.parse_bytes(bytes(raw))
         self.assertTrue(result.ok, result.status)
         self.assertFalse(result.owid.verify_with_crypto(crypto, []))
 
@@ -213,7 +213,7 @@ class PayloadAndSerializationTests(unittest.TestCase):
         unpadded = fixtures.SUPPLIER_VECTOR
         padded = unpadded + "="
         self.assertEqual(
-            _parsed(Owid.try_from_base64(unpadded)), _parsed(Owid.try_from_base64(padded))
+            _parsed(Owid.parse(unpadded)), _parsed(Owid.parse(padded))
         )
 
     def test_empty_marker(self) -> None:

@@ -99,7 +99,9 @@ def parse_bytes(buffer) -> ParseResult:
     data = bytes(buffer)
     total = len(data)
     if total < 1:
-        return _failed(ParseStatus.UNEXPECTED_END)
+        # Nothing was supplied, which is not the same as data that stopped
+        # part way through a field.
+        return _failed(ParseStatus.MISSING_INPUT)
 
     # Imported here rather than at module scope: owid.py imports this module
     # for its try_ surfaces, so importing it back at the top would be a cycle.
@@ -112,11 +114,12 @@ def parse_bytes(buffer) -> ParseResult:
         return _failed(ParseStatus.UNSUPPORTED_VERSION)
 
     if version == Version.EMPTY:
-        # An empty OWID is the version byte and nothing else, so anything
-        # after it belongs to no field.
-        if at != total:
-            return _failed(ParseStatus.MALFORMED_ENVELOPE)
-        return ParseResult(True, Owid._create(version=version), ParseStatus.PARSED)
+        # The marker stands for an absent node inside a stream. It is not an
+        # OWID: it carries no domain, date, payload or signature, so it can
+        # never verify. Reading one here would hand a caller the one thing the
+        # construction boundary exists to prevent, an instance with no
+        # signature that looks like an identifier.
+        return _failed(ParseStatus.UNSUPPORTED_VERSION)
 
     # The domain, terminated by a zero byte and no longer than the published
     # maximum.
