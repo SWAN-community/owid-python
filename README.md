@@ -50,6 +50,13 @@ refuses the buffer there. The cost of a domain field an attacker sized is
 therefore fixed by that constant rather than by the length of the input, and
 no domain a name server would accept is affected.
 
+The same maximum binds the write, because a library that emits something it
+cannot read moves the fault to the consumer. A `Creator` refuses a domain
+longer than `MAXIMUM_DOMAIN_LENGTH` when the caller supplies it, before any
+signing work is done, and the writer refuses one that reached an OWID by any
+other route when the OWID is serialised. Both raise `OwidError` naming the
+maximum, as the parse does.
+
 The in-memory APIs remain subject to Python object, address-space and
 available-memory limits. Applications accepting untrusted OWIDs must choose
 limits suitable for their use case and enforce them before buffering the

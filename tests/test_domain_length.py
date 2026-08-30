@@ -13,7 +13,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 # ****************************************************************************
-"""Tests for the domain length bound in the OWID parse.
+"""Tests for the domain length bound in the OWID parse and in the write.
 
 The creator domain is stored as text followed by a zero terminator, so the
 parse finds the end of the domain by walking forward to that terminator. If
@@ -22,6 +22,12 @@ end of the buffer, which is work an attacker chooses the size of. A domain
 has a published maximum length, so these tests prove that a domain of the
 maximum length still parses, that a longer one is refused, and that a buffer
 whose terminator is missing or far away costs no more than the bound.
+
+The same maximum binds the write. A creator configured with a longer domain
+would otherwise produce an OWID that this same library refuses to parse, so
+the tests below prove that a longer domain is refused when the caller
+supplies it to a creator and again when a domain that arrived by any other
+route is serialised.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import tracemalloc
 import unittest
 
 from owid import SIGNATURE_LENGTH, Creator, Crypto, Owid, OwidError, Version
-from owid.io import MAXIMUM_DOMAIN_LENGTH
+from owid.io import MAXIMUM_DOMAIN_LENGTH, write_string
 
 #: A domain of exactly the maximum length, built from labels no longer than
 #: the 63 characters RFC 1035 allows so that the value is a shape a real
@@ -181,6 +187,106 @@ class DomainLengthTests(unittest.TestCase):
         self.assertEqual(parsed.domain, MAXIMUM_DOMAIN)
         self.assertEqual(parsed, original)
         self.assertTrue(parsed.verify_with_crypto(crypto, []))
+
+
+class CountingCrypto:
+    """Stands in for a Crypto instance and counts the times it is asked to
+    sign.
+
+    A Creator uses only can_sign and sign_byte_array, so this records the
+    signing work done on the creator side and lets a test prove a refusal
+    arrived before any of it.
+    """
+
+    def __init__(self, crypto: Crypto) -> None:
+        self._crypto = crypto
+        self.sign_calls = 0
+
+    def can_sign(self) -> bool:
+        return self._crypto.can_sign()
+
+    def sign_byte_array(self, data: bytes) -> bytes:
+        self.sign_calls += 1
+        return self._crypto.sign_byte_array(data)
+
+
+class DomainLengthWriteTests(unittest.TestCase):
+    def test_maximum_length_domain_is_written_and_parses_back(self) -> None:
+        """A domain of exactly the maximum length is written and the value
+        parses back unchanged, so the bound refuses nothing at or under the
+        maximum."""
+        owid = Owid(
+            version=Version.VERSION3,
+            domain=MAXIMUM_DOMAIN,
+            payload=PAYLOAD,
+            signature=SIGNATURE,
+        )
+
+        parsed = Owid.from_byte_array(owid.as_byte_array())
+
+        self.assertEqual(parsed.domain, MAXIMUM_DOMAIN)
+        self.assertEqual(parsed.payload, PAYLOAD)
+        self.assertEqual(parsed.signature, SIGNATURE)
+
+    def test_empty_domain_is_still_written(self) -> None:
+        """An empty domain is written as the terminator on its own, exactly
+        as it was before the bound, because the refusal is at the top of the
+        range and nothing else."""
+        buffer = bytearray()
+
+        write_string(buffer, "")
+
+        self.assertEqual(bytes(buffer), b"\0")
+
+    def test_creator_refuses_a_domain_over_the_maximum(self) -> None:
+        """A creator is refused the domain when the caller supplies it, and
+        the message names the maximum so the caller can see which limit the
+        domain crossed."""
+        domain = MAXIMUM_DOMAIN + "c"
+        self.assertEqual(len(domain), MAXIMUM_DOMAIN_LENGTH + 1)
+
+        with self.assertRaises(OwidError) as raised:
+            Creator(domain, Crypto.new())
+
+        self.assertIn(
+            "'{0}'".format(MAXIMUM_DOMAIN_LENGTH), str(raised.exception)
+        )
+
+    def test_writing_a_domain_over_the_maximum_is_refused(self) -> None:
+        """A domain that arrived by a route other than the creator, here set
+        on the OWID directly, is refused when it is serialised, so the
+        library never emits an OWID it would refuse to read."""
+        domain = MAXIMUM_DOMAIN + "c"
+        owid = Owid(
+            version=Version.VERSION3,
+            domain=domain,
+            payload=PAYLOAD,
+            signature=SIGNATURE,
+        )
+
+        with self.assertRaises(OwidError) as raised:
+            owid.as_byte_array()
+
+        self.assertIn(
+            "'{0}'".format(MAXIMUM_DOMAIN_LENGTH), str(raised.exception)
+        )
+
+    def test_refusal_comes_before_any_signature_is_computed(self) -> None:
+        """The refusal arrives before any signing work, because signing a
+        value that will be refused is wasted work on the creator side.
+
+        The counter proves it counts by signing once with a domain of the
+        maximum length, and then the creator with the longer domain is
+        refused without the counter moving again."""
+        counting = CountingCrypto(Crypto.new())
+
+        Creator(MAXIMUM_DOMAIN, counting).sign_bytes(PAYLOAD)
+        self.assertEqual(counting.sign_calls, 1)
+
+        with self.assertRaises(OwidError):
+            Creator(MAXIMUM_DOMAIN + "c", counting)
+
+        self.assertEqual(counting.sign_calls, 1)
 
 
 if __name__ == "__main__":

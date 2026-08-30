@@ -155,10 +155,23 @@ def write_string(buffer: bytearray, value: str) -> None:
 
     The string must not contain a null character because that would conflict
     with the terminator.
+
+    The only string written this way is the creator domain, and the reader
+    refuses a domain longer than MAXIMUM_DOMAIN_LENGTH, so a longer one is
+    refused here as well and the library never emits an OWID that it would
+    then refuse to read. The length compared is the encoded bytes, because
+    those are what the reader walks, and for the ASCII a domain is made of
+    they are the same count as the characters.
     """
     encoded = value.encode("utf-8")
     if 0 in encoded:
         raise OwidError("domain '{0}' is not valid".format(value))
+    if len(encoded) > MAXIMUM_DOMAIN_LENGTH:
+        raise OwidError(
+            "domain is longer than the '{0}' character maximum".format(
+                MAXIMUM_DOMAIN_LENGTH
+            )
+        )
     buffer.extend(encoded)
     buffer.append(0)
 
