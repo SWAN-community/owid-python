@@ -36,6 +36,15 @@ SIGNATURE_LENGTH = 64
 #: number of hours or minutes after this instant.
 BASE_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
+#: The longest creator domain the reader will accept, in characters. RFC 1035
+#: section 2.3.4, "Size limits", restricts the total length of a domain name,
+#: being the label octets and the label length octets, to 255 octets or less.
+#: An OWID stores the presentation form, the text "example.com", where the
+#: dots stand in for the label length octets and the root label has no text at
+#: all, so two of those 255 octets have no text equivalent and the limit on
+#: the text is two fewer. A domain is ASCII, so a character is a byte here.
+MAXIMUM_DOMAIN_LENGTH = 255 - 2
+
 
 class Reader:
     """Sequential reader over a byte buffer."""
@@ -62,26 +71,61 @@ class Reader:
         return value
 
     def read_string(self) -> str:
-        """Reads bytes up to the null terminator and decodes them as UTF-8."""
-        remaining = self._buffer[self._position:]
-        terminator = remaining.find(0)
+        """Reads bytes up to the null terminator and decodes them as UTF-8.
+
+        The only null terminated string in an OWID is the creator domain, and
+        a domain has a published maximum length, so the search for the
+        terminator stops after MAXIMUM_DOMAIN_LENGTH bytes rather than running
+        to the end of the buffer. A buffer whose terminator is missing or
+        corrupted is refused as soon as that window is exhausted, so the work
+        a hostile buffer can ask for is fixed by the constant rather than
+        growing with the length of the input.
+        """
+        window_end = self._position + MAXIMUM_DOMAIN_LENGTH + 1
+        terminator = self._buffer.find(b"\0", self._position, window_end)
         if terminator < 0:
-            raise OwidError("buffer ended before the OWID was complete")
+            if len(self._buffer) < window_end:
+                raise OwidError("buffer ended before the OWID was complete")
+            raise OwidError(
+                "domain is longer than the '{0}' character maximum".format(
+                    MAXIMUM_DOMAIN_LENGTH
+                )
+            )
         try:
-            value = remaining[:terminator].decode("utf-8")
+            value = self._buffer[self._position:terminator].decode("utf-8")
         except UnicodeDecodeError:
             raise OwidError("domain bytes are not valid UTF-8")
-        self._position += terminator + 1
+        self._position = terminator + 1
         return value
 
     def read_u32(self) -> int:
         """Reads an unsigned 32 bit little endian integer."""
-        return struct.unpack("<I", self.read_bytes(4))[0]
+        if self._position + 4 > len(self._buffer):
+            raise OwidError("buffer ended before the OWID was complete")
+        value = struct.unpack_from("<I", self._buffer, self._position)[0]
+        self._position += 4
+        return value
 
     def read_byte_array(self) -> bytes:
-        """Reads a byte array prefixed with its length as an unsigned 32 bit
-        integer."""
+        """Reads the payload, being a byte array prefixed with its length as
+        an unsigned 32 bit integer.
+
+        The length is whatever the sender declared, so it is checked against
+        the bytes actually present before anything is sized by it. A valid
+        OWID is the declared payload followed by the signature and nothing
+        else, so the length must equal the bytes remaining less the signature
+        length, and any other length, short or long, is refused here. The
+        same check refuses a signature shorter than 64 bytes and any byte
+        after the signature, which until 28 August 2026 this reader ignored.
+        """
         count = self.read_u32()
+        remaining = len(self._buffer) - self._position
+        if remaining != count + SIGNATURE_LENGTH:
+            raise OwidError(
+                "OWID payload length '{0}' does not match the '{1}' bytes "
+                "present, of which the final '{2}' must be the "
+                "signature".format(count, remaining, SIGNATURE_LENGTH)
+            )
         return self.read_bytes(count)
 
     def read_signature(self) -> bytes:
@@ -111,10 +155,23 @@ def write_string(buffer: bytearray, value: str) -> None:
 
     The string must not contain a null character because that would conflict
     with the terminator.
+
+    The only string written this way is the creator domain, and the reader
+    refuses a domain longer than MAXIMUM_DOMAIN_LENGTH, so a longer one is
+    refused here as well and the library never emits an OWID that it would
+    then refuse to read. The length compared is the encoded bytes, because
+    those are what the reader walks, and for the ASCII a domain is made of
+    they are the same count as the characters.
     """
     encoded = value.encode("utf-8")
     if 0 in encoded:
         raise OwidError("domain '{0}' is not valid".format(value))
+    if len(encoded) > MAXIMUM_DOMAIN_LENGTH:
+        raise OwidError(
+            "domain is longer than the '{0}' character maximum".format(
+                MAXIMUM_DOMAIN_LENGTH
+            )
+        )
     buffer.extend(encoded)
     buffer.append(0)
 

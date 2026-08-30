@@ -94,8 +94,11 @@ class Owid:
     def from_byte_array(cls, buffer: bytes) -> "Owid":
         """Creates an OWID from its binary form.
 
-        Raises OwidError if the first byte is not a known version or the
-        buffer is too short for the remaining fields.
+        The buffer must hold exactly one OWID, ending with the 64 byte
+        signature. Raises OwidError if the first byte is not a known
+        version, the buffer is too short for the remaining fields, or the
+        declared payload length does not leave exactly the signature at the
+        end of the buffer.
         """
         reader = io.Reader(bytes(buffer))
         return cls._from_reader(reader)

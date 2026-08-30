@@ -87,8 +87,12 @@ class IoTests(unittest.TestCase):
         self.assertEqual(reader.read_u32(), 0x0A242B01)
 
     def test_byte_array_round_trip(self) -> None:
+        # The signature follows the byte array because the only counted byte
+        # array in an OWID is the payload, and the reader checks that the
+        # declared length leaves exactly the signature after it.
         buffer = bytearray()
         io.write_byte_array(buffer, b"payload")
+        io.write_signature(buffer, bytes(io.SIGNATURE_LENGTH))
         reader = io.Reader(bytes(buffer))
         self.assertEqual(reader.read_byte_array(), b"payload")
 
@@ -114,6 +118,12 @@ class IoTests(unittest.TestCase):
         reader = io.Reader(b"no terminator")
         with self.assertRaises(OwidError):
             reader.read_string()
+
+    def test_string_scan_does_not_depend_on_the_payload_size(self) -> None:
+        payload = b"x" * (1024 * 1024)
+        reader = io.Reader(b"example.com\0" + payload)
+        self.assertEqual(reader.read_string(), "example.com")
+        self.assertEqual(reader.read_bytes(len(payload)), payload)
 
 
 if __name__ == "__main__":

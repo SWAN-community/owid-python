@@ -27,7 +27,7 @@ from typing import Optional, Sequence
 
 from .crypto import Crypto
 from .error import OwidError
-from .io import SIGNATURE_LENGTH
+from .io import MAXIMUM_DOMAIN_LENGTH, SIGNATURE_LENGTH
 from .owid import Owid
 from .version import DEFAULT_VERSION
 
@@ -62,11 +62,22 @@ class Creator:
         """Creates a new creator for the domain using the crypto instance for
         signing.
 
-        Raises OwidError if the domain is empty or whitespace, or the crypto
-        instance can not sign.
+        Raises OwidError if the domain is empty or whitespace, longer than
+        the published maximum, or the crypto instance can not sign.
+
+        The domain is checked here, where the caller supplies it, rather than
+        only when an OWID is written, so a creator that could only produce
+        OWIDs this library refuses to read never exists and no signing work
+        is done before the refusal.
         """
         if domain is None or domain.strip() == "":
             raise OwidError("domain '{0}' is not valid".format(domain))
+        if len(domain.encode("utf-8")) > MAXIMUM_DOMAIN_LENGTH:
+            raise OwidError(
+                "domain is longer than the '{0}' character maximum".format(
+                    MAXIMUM_DOMAIN_LENGTH
+                )
+            )
         if not crypto.can_sign():
             raise OwidError("instance of Crypto cannot be used to generate a signature")
         self._domain = domain
@@ -77,8 +88,9 @@ class Creator:
         """Creates a new creator from configuration containing the domain and
         the private key PEM.
 
-        Raises OwidError if the domain is empty or whitespace, or the private
-        key PEM is not valid.
+        Raises OwidError if the domain is empty or whitespace, the domain is
+        longer than the published maximum, or the private key PEM is not
+        valid.
         """
         crypto = Crypto.new_sign_only(configuration.private_key)
         return cls(configuration.domain, crypto)
