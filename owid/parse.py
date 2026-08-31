@@ -150,10 +150,12 @@ def _parse(buffer, exact: bool) -> ParseResult:
     if version == Version.EMPTY:
         # The marker stands for an absent node inside a stream. It is not an
         # OWID: it carries no domain, date, payload or signature, so it can
-        # never verify. Reading one here would hand a caller the one thing the
-        # construction boundary exists to prevent, an instance with no
-        # signature that looks like an identifier.
-        return _failed(ParseStatus.UNSUPPORTED_VERSION)
+        # never verify, and no value is handed back. A framed read still moves
+        # past its one byte, so a caller walking a run of frames can skip an
+        # absent node deliberately rather than being unable to tell one from a
+        # malformed frame.
+        return ParseResult(False, None, ParseStatus.ABSENT_NODE,
+                           1 if not exact else 0)
 
     # The domain, terminated by a zero byte and no longer than the published
     # maximum.
@@ -207,8 +209,15 @@ def _parse(buffer, exact: bool) -> ParseResult:
     # envelope, so it needs the declaration and the signature to be present
     # and says nothing about the rest.
     present = (total - at) - SIGNATURE_LENGTH
-    if present != declared if exact else present < declared:
-        return _failed(ParseStatus.BYTE_COUNT_MISMATCH)
+    if exact:
+        if present != declared:
+            return _failed(ParseStatus.BYTE_COUNT_MISMATCH)
+    elif present < declared:
+        # A frame running past the bytes supplied is data stopping early, not
+        # a declaration disagreeing with data that is all present. A caller
+        # reading from a source still arriving needs to know whether waiting
+        # for more bytes would help, and those are different answers.
+        return _failed(ParseStatus.UNEXPECTED_END)
 
     payload = data[at:at + declared]
     at += declared

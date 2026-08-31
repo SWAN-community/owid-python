@@ -210,12 +210,14 @@ class EveryFailureConditionTests(unittest.TestCase):
         self.assertEqual(
             ParseStatus.UNSUPPORTED_VERSION, Owid.parse_bytes(bytes(raw)).status)
 
-    def test_empty_marker_is_not_an_owid(self) -> None:
+    def test_empty_marker_is_an_absent_node(self) -> None:
         """The version 0 marker stands for an absent node inside a stream. It
-        has no signature, so it can never verify, and letting one through would
-        be the single case of an unsigned instance reaching a caller."""
+        has no signature, so it can never verify, and no value is handed back. It
+        is named for what it is rather than called an unsupported version,
+        because version 0 is supported and meaningful, it simply is not an
+        OWID."""
         self.assertEqual(
-            ParseStatus.UNSUPPORTED_VERSION, Owid.parse_bytes(b"\x00").status)
+            ParseStatus.ABSENT_NODE, Owid.parse_bytes(b"\x00").status)
 
     def test_unexpected_end(self) -> None:
         """Data that stops inside a field, before the declared length is even
@@ -308,6 +310,23 @@ class SignatureStatusTests(unittest.TestCase):
             SignatureStatus.IMPLEMENTATION_CAPACITY_EXCEEDED, SignatureStatus)
 
 
+    def test_an_absent_node_is_skipped_and_the_next_frame_read(self) -> None:
+        """The distinction the marker exists for: a caller walking a run of
+        frames can tell an absent node from a malformed one, and carry on."""
+        envelope = _creator().create(b"after the gap").as_byte_array()
+        data = b"\x00" + envelope
+
+        first = Owid.parse_prefix(data)
+        self.assertFalse(first.ok, "a marker is not an OWID")
+        self.assertIsNone(first.owid)
+        self.assertEqual(ParseStatus.ABSENT_NODE, first.status)
+        self.assertEqual(1, first.consumed, "and it moves past the one byte")
+
+        second = Owid.parse_prefix(data[first.consumed:])
+        self.assertTrue(second.ok, second.status)
+        self.assertEqual(b"after the gap", second.owid.payload)
+
+
 class FramedReadTests(unittest.TestCase):
     """Reading one envelope from a buffer that holds more after it.
 
@@ -350,7 +369,10 @@ class FramedReadTests(unittest.TestCase):
         result = Owid.parse_prefix(raw)
 
         self.assertFalse(result.ok)
-        self.assertEqual(ParseStatus.BYTE_COUNT_MISMATCH, result.status)
+        # Data stopping early, not a declaration disagreeing with data that is
+        # all present. A caller reading from a source still arriving needs to
+        # know whether waiting for more bytes would help.
+        self.assertEqual(ParseStatus.UNEXPECTED_END, result.status)
         self.assertEqual(0, result.consumed)
         # Reading it again gives the same answer, since nothing moved.
         self.assertEqual(result.status, Owid.parse_prefix(raw).status)
@@ -368,7 +390,7 @@ class FramedReadTests(unittest.TestCase):
             ("unknown version", bytes(unknown),
              ParseStatus.UNSUPPORTED_VERSION),
             ("the absent marker", b"\x00",
-             ParseStatus.UNSUPPORTED_VERSION),
+             ParseStatus.ABSENT_NODE),
         ):
             with self.subTest(name):
                 self.assertEqual(
