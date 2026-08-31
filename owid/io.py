@@ -40,6 +40,16 @@ SIGNATURE_LENGTH = 64
 #: number of hours or minutes after this instant.
 BASE_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
+#: The largest count of minutes after BASE_DATE that a datetime can hold,
+#: which is 4,197,074,399 and lands on 9999-12-31 23:59. The four byte count
+#: in versions 2 and 3 runs to 4,294,967,295, which is 15 February 10186, so
+#: a count above this is one the wire format allows and this runtime cannot
+#: represent. Derived from datetime.max rather than written as a number so it
+#: cannot drift from the runtime, and worked out on naive values because
+#: datetime.max cannot take part in time zone arithmetic without overflowing.
+_SPAN_TO_MAX = datetime.max - BASE_DATE.replace(tzinfo=None)
+MAXIMUM_MINUTES = _SPAN_TO_MAX.days * 1440 + _SPAN_TO_MAX.seconds // 60
+
 #: The longest creator domain the reader will accept, in characters. RFC 1035
 #: section 2.3.4, "Size limits", restricts the total length of a domain name,
 #: being the label octets and the label length octets, to 255 octets or less.

@@ -206,7 +206,7 @@ The reasons a read can give are named by `ParseStatus`.
 | `UNEXPECTED_END` | The data stopped in the middle of a field. |
 | `INVALID_DOMAIN_ENCODING` | The creator domain is not terminated, or is longer than the published maximum. |
 | `BYTE_COUNT_MISMATCH` | The declared payload byte count disagrees with the bytes actually present. |
-| `IMPLEMENTATION_CAPACITY_EXCEEDED` | The envelope is consistent but larger than this runtime can hold, so the same bytes may be readable elsewhere. |
+| `IMPLEMENTATION_CAPACITY_EXCEEDED` | The envelope is consistent but larger than this runtime can hold, or dated past the end of 9999 where `datetime` stops, so the same bytes may be readable elsewhere. |
 | `ABSENT_NODE` | The one byte marker standing for a node that is not there. |
 | `MALFORMED_ENVELOPE` | Malformed in a way none of the above describes. |
 

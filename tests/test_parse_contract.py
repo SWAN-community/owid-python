@@ -244,17 +244,32 @@ class EveryFailureConditionTests(unittest.TestCase):
         self.assertEqual(
             ParseStatus.BYTE_COUNT_MISMATCH, Owid.parse_bytes(raw).status)
 
-    def test_implementation_capacity_and_malformed_are_unreachable(self) -> None:
-        """IMPLEMENTATION_CAPACITY_EXCEEDED cannot be reached in Python:
+    def test_implementation_capacity_is_a_date_the_runtime_cannot_hold(
+            self) -> None:
+        """IMPLEMENTATION_CAPACITY_EXCEEDED is produced by a date past the end
+        of 9999, which datetime cannot hold while the wire's four byte minute
+        count runs to the year 10186. The boundary is pinned in
+        test_date_range. A payload count cannot produce it here, because
         integers are unbounded and a declaration large enough to matter can
-        never agree with the bytes actually present, so the count check refuses
-        it first. MALFORMED_ENVELOPE is likewise unreachable while the count
-        check holds, and both are kept as backstops so that a future change to
-        that arithmetic cannot pass silently.
+        never agree with the bytes actually present, so the count check
+        refuses it first. The date bytes follow the version byte and the
+        terminated domain."""
+        raw = bytearray(_creator().create(b"x").as_byte_array())
+        at = 1 + len("example.com") + 1
+        raw[at:at + 4] = b"\xff\xff\xff\xff"
 
-        This test exists to record that, so the gap is a stated decision rather
-        than something nobody noticed."""
-        self.assertIn(ParseStatus.IMPLEMENTATION_CAPACITY_EXCEEDED, ParseStatus)
+        result = Owid.parse_bytes(bytes(raw))
+
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.owid)
+        self.assertEqual(
+            ParseStatus.IMPLEMENTATION_CAPACITY_EXCEEDED, result.status)
+
+    def test_malformed_envelope_is_unreachable(self) -> None:
+        """MALFORMED_ENVELOPE is unreachable while the count check holds, and
+        is kept as a backstop so that a future change to that arithmetic
+        cannot pass silently. This test exists to record that, so the gap is
+        a stated decision rather than something nobody noticed."""
         self.assertIn(ParseStatus.MALFORMED_ENVELOPE, ParseStatus)
 
 

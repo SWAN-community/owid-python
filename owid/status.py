@@ -69,6 +69,12 @@ class ParseStatus(Enum):
     #: The envelope is structurally consistent but larger than this runtime
     #: can hold. Not a fault in the data, and deliberately distinct from the
     #: data being wrong, because the same bytes may be readable elsewhere.
+    #: Produced by a date past the end of the year 9999, where datetime stops
+    #: while the four byte minute count of versions 2 and 3 runs to 15
+    #: February 10186. The date is judged before the arithmetic, so a read
+    #: never raises on it. A payload count cannot produce it here, because
+    #: Python integers are unbounded and the count check refuses a
+    #: declaration that disagrees with the bytes present first.
     IMPLEMENTATION_CAPACITY_EXCEEDED = "ImplementationCapacityExceeded"
 
     #: The version 0 marker, which stands for an absent node inside a stream.
