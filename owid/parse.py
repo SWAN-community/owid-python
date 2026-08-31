@@ -21,7 +21,12 @@ import binascii
 from datetime import timedelta
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
-from .io import BASE_DATE, MAXIMUM_DOMAIN_LENGTH, SIGNATURE_LENGTH
+from .io import (
+    BASE_DATE,
+    MAXIMUM_DOMAIN_LENGTH,
+    MAXIMUM_MINUTES,
+    SIGNATURE_LENGTH,
+)
 from .status import ParseStatus
 from .version import Version
 
@@ -185,6 +190,9 @@ def _parse(buffer, exact: bool) -> ParseResult:
     if version == Version.VERSION1:
         if total - at < 2:
             return _failed(ParseStatus.UNEXPECTED_END)
+        # Two bytes of hours reach 65,535 hours, which is June 2027, so this
+        # arithmetic cannot leave the runtime's range and there is nothing to
+        # guard.
         hours = (data[at] << 8) | data[at + 1]
         at += 2
         date = BASE_DATE + timedelta(hours=hours)
@@ -193,6 +201,14 @@ def _parse(buffer, exact: bool) -> ParseResult:
             return _failed(ParseStatus.UNEXPECTED_END)
         minutes = int.from_bytes(data[at:at + 4], "little")
         at += 4
+        # The wire allows 4,294,967,295 minutes, which is the year 10186, and
+        # datetime stops at the end of 9999. A count past that is judged
+        # before the arithmetic, because the addition would raise
+        # OverflowError on it and this read promises not to raise. The same
+        # bytes read fine where the date type is wider, so this is the
+        # runtime's limit rather than a fault in the data.
+        if minutes > MAXIMUM_MINUTES:
+            return _failed(ParseStatus.IMPLEMENTATION_CAPACITY_EXCEEDED)
         date = BASE_DATE + timedelta(minutes=minutes)
 
     if total - at < 4:
