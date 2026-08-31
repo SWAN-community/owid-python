@@ -24,34 +24,20 @@ fail.
 from __future__ import annotations
 
 import base64
-import binascii
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from . import io
 from .crypto import Crypto
 from .error import OwidError
 from .version import DEFAULT_VERSION, Version
 
-
-def _decode_base64(value: str) -> bytes:
-    """Decodes a standard alphabet base 64 string with or without padding.
-
-    The encoded OWIDs occur both with and without padding, so reading must
-    accept both. Missing padding is added before decoding.
-    """
-    cleaned = value.strip()
-    remainder = len(cleaned) % 4
-    if remainder == 2:
-        cleaned += "=="
-    elif remainder == 3:
-        cleaned += "="
-    elif remainder == 1:
-        raise OwidError("base 64 decoding failed because the length is invalid")
-    try:
-        return base64.b64decode(cleaned, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise OwidError("base 64 decoding failed because {0}".format(exc))
+if TYPE_CHECKING:
+    # Only for the annotations below. Importing parse here at run time would
+    # be a cycle, because parse imports this module to build the OWID it hands
+    # back, so both names are resolved by the type checker alone.
+    from .parse import ParseResult
+    from .status import SignatureStatus
 
 
 def _encode_base64(value: bytes) -> str:
@@ -187,17 +173,13 @@ class Owid:
         return parse_bytes(buffer)
 
     @classmethod
-    def _from_base64_or_raise(cls, value: str) -> "Owid":
-        """Creates an OWID from a base 64 encoded string.
-
-        Raises OwidError if the string is not valid base 64 or the bytes do
-        not form a valid OWID.
-        """
-        return cls._from_byte_array_or_raise(_decode_base64(value))
-
-    @classmethod
     def _from_byte_array_or_raise(cls, buffer: bytes) -> "Owid":
-        """Creates an OWID from its binary form.
+        """The raising counterpart of parse_bytes, over the low level reader.
+
+        Private, and not the way to read external data, because bytes that
+        are not an OWID are an ordinary outcome and parse_bytes reports the
+        reason rather than raising. This route survives so the tests can
+        assert the messages the low level reader gives.
 
         The buffer must hold exactly one OWID, ending with the 64 byte
         signature. Raises OwidError if the first byte is not a known

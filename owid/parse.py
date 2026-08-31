@@ -19,11 +19,16 @@
 import base64
 import binascii
 from datetime import timedelta
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 from .io import BASE_DATE, MAXIMUM_DOMAIN_LENGTH, SIGNATURE_LENGTH
 from .status import ParseStatus
 from .version import Version
+
+if TYPE_CHECKING:
+    # Only for the annotation below. Importing owid here at run time would be
+    # a cycle, because this module builds the OWID it hands back.
+    from .owid import Owid
 
 
 class ParseResult(NamedTuple):
@@ -38,7 +43,7 @@ class ParseResult(NamedTuple):
     ok: bool
 
     #: The OWID on success, otherwise None.
-    owid: Optional[object]
+    owid: Optional["Owid"]
 
     #: PARSED on success, otherwise the specific reason.
     status: ParseStatus

@@ -18,6 +18,10 @@
 The format uses little endian unsigned 32 bit integers, null terminated
 strings, and a fixed 64 byte signature. The date is stored as the count of
 hours (version 1) or minutes (versions 2 and 3) since the base date.
+
+The write helpers here are the ones an OWID is serialized with. The Reader is
+not the public read, because external data is read by owid.parse, which walks
+the bytes by index and reports a ParseStatus instead of raising.
 """
 
 from __future__ import annotations
@@ -47,7 +51,12 @@ MAXIMUM_DOMAIN_LENGTH = 255 - 2
 
 
 class Reader:
-    """Sequential reader over a byte buffer."""
+    """Sequential reader over a byte buffer, raising on anything malformed.
+
+    Kept for the tests that assert those messages, and reached only through
+    the private raising route on Owid. Callers read external data with
+    Owid.parse, Owid.parse_bytes or Owid.parse_prefix instead.
+    """
 
     def __init__(self, buffer: bytes) -> None:
         self._buffer = buffer
