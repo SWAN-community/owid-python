@@ -43,12 +43,16 @@ class ParseResult(NamedTuple):
     #: PARSED on success, otherwise the specific reason.
     status: ParseStatus
 
+    #: How many bytes the envelope occupied. Only meaningful for a framed
+    #: read, where a caller advances by this much to reach the next one.
+    consumed: int = 0
+
     def __bool__(self) -> bool:
         return self.ok
 
 
 def _failed(status: ParseStatus) -> ParseResult:
-    return ParseResult(False, None, status)
+    return ParseResult(False, None, status, 0)
 
 
 def parse_base64(value) -> ParseResult:
@@ -79,6 +83,31 @@ def parse_base64(value) -> ParseResult:
     return parse_bytes(buffer)
 
 
+def parse_prefix(buffer) -> ParseResult:
+    """Reads one OWID from the start of a buffer that may hold more after it.
+
+    This is the framed contract. It differs from parse_bytes in exactly one
+    place: a whole buffer knows where the envelope ends, so the declared
+    payload must leave exactly the signature, while here what follows may be
+    the next envelope rather than rubbish, so the declaration and the
+    signature need only be present.
+
+    The result carries how many bytes the envelope occupied, so a caller walks
+    a run of them by slicing:
+
+        while data:
+            result = Owid.parse_prefix(data)
+            if not result:
+                break
+            use(result.owid)
+            data = data[result.consumed:]
+
+    Nothing is consumed when an envelope is refused, because a half read one
+    leaves a caller somewhere it cannot reason about.
+    """
+    return _parse(buffer, exact=False)
+
+
 def parse_bytes(buffer) -> ParseResult:
     """Reads a complete OWID from a buffer holding exactly one.
 
@@ -91,6 +120,11 @@ def parse_bytes(buffer) -> ParseResult:
     exception that unwinds. That matters because whoever is sending the data
     chooses how often this fails and how large each attempt is.
     """
+    return _parse(buffer, exact=True)
+
+
+def _parse(buffer, exact: bool) -> ParseResult:
+    """The one walk both reads share."""
     if buffer is None:
         return _failed(ParseStatus.MISSING_INPUT)
     if not isinstance(buffer, (bytes, bytearray, memoryview)):
@@ -166,8 +200,14 @@ def parse_bytes(buffer) -> ParseResult:
     # declaration. Reporting that as a truncation would name a different fault
     # for the same evidence: what is certain is that the declared payload
     # cannot leave exactly the signature the version requires.
+    #
+    # The two contracts differ here, and only here. A whole buffer knows the
+    # envelope boundary, so the declaration must leave exactly the signature
+    # and no more. A framed read does not: what follows may be the next
+    # envelope, so it needs the declaration and the signature to be present
+    # and says nothing about the rest.
     present = (total - at) - SIGNATURE_LENGTH
-    if present != declared:
+    if present != declared if exact else present < declared:
         return _failed(ParseStatus.BYTE_COUNT_MISMATCH)
 
     payload = data[at:at + declared]
@@ -175,7 +215,7 @@ def parse_bytes(buffer) -> ParseResult:
     signature = data[at:at + SIGNATURE_LENGTH]
     at += SIGNATURE_LENGTH
 
-    if at != total:
+    if exact and at != total:
         # Unreachable while the count check above holds, and kept so a future
         # change to that arithmetic cannot silently start accepting trailing
         # bytes.
@@ -191,4 +231,5 @@ def parse_bytes(buffer) -> ParseResult:
             signature=signature,
         ),
         ParseStatus.PARSED,
+        at,
     )

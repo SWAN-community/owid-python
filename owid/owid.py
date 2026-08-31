@@ -168,6 +168,18 @@ class Owid:
         return parse_base64(value)
 
     @classmethod
+    def parse_prefix(cls, buffer) -> "ParseResult":
+        """Reads one OWID from the start of a buffer that may hold more.
+
+        The framed read. What follows the envelope is left alone, because it
+        may be the next one rather than rubbish, and the result says how many
+        bytes this envelope occupied so a caller can walk a run of them.
+        """
+        from .parse import parse_prefix
+
+        return parse_prefix(buffer)
+
+    @classmethod
     def parse_bytes(cls, buffer) -> "ParseResult":
         """Reads a complete OWID from a buffer holding exactly one."""
         from .parse import parse_bytes

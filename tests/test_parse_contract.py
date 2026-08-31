@@ -306,3 +306,72 @@ class SignatureStatusTests(unittest.TestCase):
         self.assertIn(SignatureStatus.VERIFICATION_ERROR, SignatureStatus)
         self.assertIn(
             SignatureStatus.IMPLEMENTATION_CAPACITY_EXCEEDED, SignatureStatus)
+
+
+class FramedReadTests(unittest.TestCase):
+    """Reading one envelope from a buffer that holds more after it.
+
+    The two reads differ in exactly one place. A whole buffer knows where the
+    envelope ends, so the declared payload must leave exactly the signature. A
+    framed read does not, because what follows may be the next envelope rather
+    than rubbish.
+    """
+
+    def test_walks_a_run_of_envelopes(self) -> None:
+        creator = _creator()
+        first = creator.create(b"first").as_byte_array()
+        second = creator.create(b"second").as_byte_array()
+        data = first + second
+
+        payloads = []
+        while data:
+            result = Owid.parse_prefix(data)
+            self.assertTrue(result.ok, result.status)
+            payloads.append(result.owid.payload)
+            data = data[result.consumed:]
+
+        self.assertEqual([b"first", b"second"], payloads)
+
+    def test_the_whole_buffer_read_refuses_the_same_bytes(self) -> None:
+        """Where nothing else could own the trailing bytes, they are a
+        disagreement rather than the next envelope."""
+        creator = _creator()
+        data = (creator.create(b"first").as_byte_array()
+                + creator.create(b"second").as_byte_array())
+
+        result = Owid.parse_bytes(data)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(ParseStatus.BYTE_COUNT_MISMATCH, result.status)
+
+    def test_a_truncated_envelope_is_refused_and_consumes_nothing(self) -> None:
+        raw = _creator().create(b"payload").as_byte_array()[:-1]
+
+        result = Owid.parse_prefix(raw)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(ParseStatus.BYTE_COUNT_MISMATCH, result.status)
+        self.assertEqual(0, result.consumed)
+        # Reading it again gives the same answer, since nothing moved.
+        self.assertEqual(result.status, Owid.parse_prefix(raw).status)
+
+    def test_the_framed_read_reports_the_same_reasons(self) -> None:
+        """Everything except what follows the envelope is judged identically,
+        so a caller does not have to learn two vocabularies."""
+        good = _creator().create(b"payload").as_byte_array()
+        unknown = bytearray(good)
+        unknown[0] = 9
+
+        for name, raw, expected in (
+            ("stops inside a field", good[:3], ParseStatus.UNEXPECTED_END),
+            ("nothing supplied", b"", ParseStatus.MISSING_INPUT),
+            ("unknown version", bytes(unknown),
+             ParseStatus.UNSUPPORTED_VERSION),
+            ("the absent marker", b"\x00",
+             ParseStatus.UNSUPPORTED_VERSION),
+        ):
+            with self.subTest(name):
+                self.assertEqual(
+                    expected, Owid.parse_prefix(raw).status)
+                self.assertEqual(
+                    expected, Owid.parse_bytes(raw).status)
