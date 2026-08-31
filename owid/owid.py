@@ -24,34 +24,20 @@ fail.
 from __future__ import annotations
 
 import base64
-import binascii
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from . import io
 from .crypto import Crypto
 from .error import OwidError
 from .version import DEFAULT_VERSION, Version
 
-
-def _decode_base64(value: str) -> bytes:
-    """Decodes a standard alphabet base 64 string with or without padding.
-
-    The encoded OWIDs occur both with and without padding, so reading must
-    accept both. Missing padding is added before decoding.
-    """
-    cleaned = value.strip()
-    remainder = len(cleaned) % 4
-    if remainder == 2:
-        cleaned += "=="
-    elif remainder == 3:
-        cleaned += "="
-    elif remainder == 1:
-        raise OwidError("base 64 decoding failed because the length is invalid")
-    try:
-        return base64.b64decode(cleaned, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise OwidError("base 64 decoding failed because {0}".format(exc))
+if TYPE_CHECKING:
+    # Only for the annotations below. Importing parse here at run time would
+    # be a cycle, because parse imports this module to build the OWID it hands
+    # back, so both names are resolved by the type checker alone.
+    from .parse import ParseResult
+    from .status import SignatureStatus
 
 
 def _encode_base64(value: bytes) -> str:
@@ -59,8 +45,29 @@ def _encode_base64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
+#: Passed to Owid.__init__ by the two paths allowed to build one. Python
+#: cannot make a constructor package private, so the boundary is kept by
+#: asking for something a caller outside this package has no reason to have.
+_INTERNAL = object()
+
+
 class Owid:
-    """OWID structure which can be used as a node in a tree."""
+    """OWID structure which can be used as a node in a tree.
+
+    An OWID is a claim about who created some data and when, and it is only
+    worth anything because it is signed. A caller therefore cannot build one.
+    An instance arrives either from parsing bytes that were already a complete
+    OWID, or from a Creator that signs one into existence. There is
+    deliberately no way to assemble a half made one, because an unsigned OWID
+    is indistinguishable from a signed one to the code downstream of it, and
+    the difference only surfaces later when a verification fails somewhere
+    nobody is watching.
+
+    The payload and signature are handed out as copies for the same reason: a
+    parsed OWID's signature covers its fields as they arrived, so code that
+    could change them afterwards would hold something whose signature no
+    longer describes it.
+    """
 
     def __init__(
         self,
@@ -69,30 +76,110 @@ class Owid:
         date: Optional[datetime] = None,
         payload: bytes = b"",
         signature: bytes = b"",
+        _token: object = None,
     ) -> None:
-        #: The byte version of the OWID.
-        self.version = version
-        #: Domain associated with the creator.
-        self.domain = domain
-        #: The date and time to the nearest minute in UTC of the creation.
-        self.date = date if date is not None else datetime.now(timezone.utc)
-        #: Bytes that form the payload.
-        self.payload = payload
-        #: Signature for this OWID and any others provided when signing.
-        self.signature = signature
+        if _token is not _INTERNAL:
+            raise OwidError(
+                "an OWID cannot be constructed directly. Use "
+                "Owid.parse or Owid.parse_bytes to read "
+                "one, or Creator.create to sign a new one"
+            )
+        self._version = version
+        self._domain = domain
+        self._date = date if date is not None else datetime.now(timezone.utc)
+        self._payload = bytes(payload)
+        self._signature = bytes(signature)
 
-    @classmethod
-    def from_base64(cls, value: str) -> "Owid":
-        """Creates an OWID from a base 64 encoded string.
+    @property
+    def version(self) -> Version:
+        """The byte version of the OWID."""
+        return self._version
 
-        Raises OwidError if the string is not valid base 64 or the bytes do
-        not form a valid OWID.
+    @property
+    def domain(self) -> str:
+        """Domain associated with the creator."""
+        return self._domain
+
+    @property
+    def date(self) -> datetime:
+        """The date and time to the nearest minute in UTC of the creation."""
+        return self._date
+
+    @property
+    def payload(self) -> bytes:
+        """Bytes that form the payload.
+
+        Read only, and bytes rather than a mutable buffer, because the
+        signature covers the payload as it arrived. Code able to change it
+        would hold something whose signature no longer describes it.
         """
-        return cls.from_byte_array(_decode_base64(value))
+        return self._payload
+
+    @property
+    def signature(self) -> bytes:
+        """Signature for this OWID and any others provided when signing."""
+        return self._signature
 
     @classmethod
-    def from_byte_array(cls, buffer: bytes) -> "Owid":
-        """Creates an OWID from its binary form.
+    def _create(
+        cls,
+        version: Version = DEFAULT_VERSION,
+        domain: str = "",
+        date: Optional[datetime] = None,
+        payload: bytes = b"",
+        signature: bytes = b"",
+    ) -> "Owid":
+        """Builds an instance from fields a parser or creator has validated."""
+        return cls(
+            version=version,
+            domain=domain,
+            date=date,
+            payload=payload,
+            signature=signature,
+            _token=_INTERNAL,
+        )
+
+    @classmethod
+    def parse(cls, value) -> "ParseResult":
+        """Reads a complete OWID from its base 64 form.
+
+        Returns a result that is truthy on success and carries the OWID only
+        then, with a named reason either way, so ``if result:`` reads the way
+        Python reads. Malformed input is an ordinary outcome rather than an
+        exception, because the data comes from outside and whoever sends it
+        chooses how often it is wrong.
+        """
+        from .parse import parse_base64
+
+        return parse_base64(value)
+
+    @classmethod
+    def parse_prefix(cls, buffer) -> "ParseResult":
+        """Reads one OWID from the start of a buffer that may hold more.
+
+        The framed read. What follows the envelope is left alone, because it
+        may be the next one rather than rubbish, and the result says how many
+        bytes this envelope occupied so a caller can walk a run of them.
+        """
+        from .parse import parse_prefix
+
+        return parse_prefix(buffer)
+
+    @classmethod
+    def parse_bytes(cls, buffer) -> "ParseResult":
+        """Reads a complete OWID from a buffer holding exactly one."""
+        from .parse import parse_bytes
+
+        return parse_bytes(buffer)
+
+    @classmethod
+    def _from_byte_array_or_raise(cls, buffer: bytes) -> "Owid":
+        """The raising counterpart of parse_bytes, over the low level reader.
+
+        Private, and not the way to read external data, because bytes that
+        are not an OWID are an ordinary outcome and parse_bytes reports the
+        reason rather than raising. This route survives so the tests can
+        assert the messages the low level reader gives.
 
         The buffer must hold exactly one OWID, ending with the 64 byte
         signature. Raises OwidError if the first byte is not a known
@@ -108,12 +195,12 @@ class Owid:
         """Creates an OWID by reading the next fields from the reader."""
         version = Version.from_byte(reader.read_byte())
         if version == Version.EMPTY:
-            return cls(version=version)
+            return cls._create(version=version)
         domain = reader.read_string()
         date = reader.read_date(version)
         payload = reader.read_byte_array()
         signature = reader.read_signature()
-        return cls(
+        return cls._create(
             version=version,
             domain=domain,
             date=date,
@@ -206,6 +293,43 @@ class Owid:
         signed, using the public key in SPKI PEM form provided."""
         crypto = Crypto.new_verify_only(public_pem)
         return self.verify_with_crypto(crypto, others)
+
+    def signature_status(
+        self, public_pem: str, others: Optional[Sequence["Owid"]] = None
+    ) -> "SignatureStatus":
+        """Says whether the signature is genuine, or why that could not be
+        decided.
+
+        Only two of the answers are about the signature. The rest say the
+        question could not be answered, which is a different thing and must
+        never be reported as a forgery. A key that cannot be decoded leaves the
+        signature unjudged, and a caller acting on "invalid" would reject good
+        identifiers during an outage. On 30 August 2026 the key endpoints
+        served PEM a strict parser rejects and every offline verification
+        failed, with the keys and the identifiers both fine.
+        """
+        from .status import SignatureStatus
+
+        if not public_pem:
+            return SignatureStatus.KEY_UNAVAILABLE
+        if len(self._signature) != io.SIGNATURE_LENGTH:
+            return SignatureStatus.INVALID_SIGNATURE_LENGTH
+        try:
+            crypto = Crypto.new_verify_only(public_pem)
+        except Exception:
+            # The key is the thing at fault, not the identifier.
+            return SignatureStatus.INVALID_KEY
+        try:
+            data = self.data_for_crypto(others if others is not None else [])
+            matched = crypto.verify_byte_array(data, self._signature)
+        except Exception:
+            # The provider failed on inputs that were themselves fine.
+            return SignatureStatus.VERIFICATION_ERROR
+        return (
+            SignatureStatus.SIGNATURE_VALID
+            if matched
+            else SignatureStatus.SIGNATURE_INVALID
+        )
 
     def __str__(self) -> str:
         """Formats the OWID as a base 64 string."""

@@ -36,10 +36,12 @@ format defines no smaller payload limit. The null-terminated domain carries
 no length of its own, so the protocol alone is not an application input limit
 for the complete envelope.
 
-This package validates that the declared payload length agrees with the bytes
-present before it sizes or copies the payload. A large declaration without
-the corresponding bytes is malformed and is rejected without allocating the
-declared size. A matching large payload is not malformed merely because it is
+This package compares the declared payload length with the bytes actually
+present before it sizes or copies the payload, so a large declaration without
+the corresponding bytes is refused without ever allocating the declared size.
+That refusal is `ParseStatus.BYTE_COUNT_MISMATCH` on a whole buffer read and
+`ParseStatus.UNEXPECTED_END` on a framed one, for the reason given under
+reading below. A matching large payload is not malformed merely because it is
 large, and parsing work and memory use scale with the bytes actually present.
 
 The domain ends at a zero terminator rather than at a declared length, so a
@@ -55,19 +57,24 @@ cannot read moves the fault to the consumer. A `Creator` refuses a domain
 longer than `MAXIMUM_DOMAIN_LENGTH` when the caller supplies it, before any
 signing work is done, and the writer refuses one that reached an OWID by any
 other route when the OWID is serialised. Both raise `OwidError` naming the
-maximum, as the parse does.
+maximum, because a domain that long is a fault in the calling code rather than
+data arriving from outside. A read reports the same finding as
+`ParseStatus.INVALID_DOMAIN_ENCODING` instead of raising, as there the domain
+came from whoever sent the bytes.
 
 The in-memory APIs remain subject to Python object, address-space and
 available-memory limits. Applications accepting untrusted OWIDs must choose
 limits suitable for their use case and enforce them before buffering the
 binary form or decoding Base64. An implementation capacity failure or an
-application policy rejection is distinct from an invalid OWID.
+application policy rejection is distinct from an invalid OWID, which is why
+`ParseStatus.IMPLEMENTATION_CAPACITY_EXCEEDED` is a status of its own and the
+same bytes may be readable somewhere with more room.
 
-For transport input, limit the complete HTTP body or encoded envelope; allow
-for the domain and other OWID fields as well as the payload. After parsing,
-`len(owid.payload)` reports the actual payload size without another copy and
-can be used for downstream policy. The parser cannot choose either limit on
-behalf of the application.
+For transport input, limit the complete HTTP body or encoded envelope, and
+allow for the domain and other OWID fields as well as the payload. After a
+successful read, `len(result.owid.payload)` reports the actual payload size
+without another copy and can be used for downstream policy. The reader cannot
+choose either limit on behalf of the application.
 
 ## Installation
 
@@ -88,6 +95,9 @@ python -m pip install -e .
 
 ## Usage
 
+Create a creator that holds the signing keys, create a signed OWID, serialize
+it, then read it back later and verify it with the public key.
+
 ```python
 from owid import Creator, Crypto, Owid
 
@@ -95,44 +105,209 @@ from owid import Creator, Crypto, Owid
 crypto = Crypto.new()
 creator = Creator("example.com", crypto)
 
-# Create and sign an OWID with a payload.
-owid = creator.sign_string("Hello World")
+# Creating and signing are one step, so an OWID never exists unsigned.
+owid = creator.create_string("Hello World")
 
 # Serialize to base 64 for storage or transmission.
 encoded = owid.as_base64()
 
-# Later, or elsewhere, decode and verify with the creator public key.
-copy = Owid.from_base64(encoded)
-public_pem = crypto.public_key_pem()
-assert copy.verify_with_public_key(public_pem, [])
+# Later, or elsewhere, read it back. Input from outside may be anything at
+# all, so reading answers with a result rather than raising.
+result = Owid.parse(encoded)
+if result:
+    public_pem = crypto.public_key_pem()
+    assert result.owid.verify_with_public_key(public_pem, [])
+else:
+    # result.status names which of the expected problems it was, for example
+    # ParseStatus.INVALID_BASE64 or ParseStatus.BYTE_COUNT_MISMATCH.
+    reason = result.status.value
 ```
 
-OWIDs chain together. To sign an OWID with another OWID covered by the same
-signature, pass the others when signing and the same others, in the same
-order, when verifying.
+OWIDs chain together. Create one that covers others, and pass the same others,
+in the same order, when verifying.
 
 ```python
-root = creator.sign_string("root")
-party = Owid(payload=b"party")
-creator.sign_with_others(party, [root])
+root = creator.create_string("root")
+party = creator.create(b"party", [root])
 
 assert party.verify_with_crypto(crypto, [root])
 assert not party.verify_with_crypto(crypto, [])
 ```
 
+Where the difference between a signature that does not match and a check that
+could not be made changes what your code should do, ask for the status rather
+than a true or false answer. A key that cannot be read is reported as a fault
+in the key and never as a forgery.
+
+```python
+from owid import SignatureStatus
+
+status = owid.signature_status(crypto.public_key_pem())
+if status is SignatureStatus.SIGNATURE_VALID:
+    pass  # Genuine.
+elif status is SignatureStatus.SIGNATURE_INVALID:
+    pass  # The only status meaning the identifier should be distrusted.
+else:
+    # INVALID_KEY, VERIFICATION_ERROR and the rest mean the question could
+    # not be answered, which is an operational fault rather than an attack.
+    pass
+```
+
+## How an OWID comes into being
+
+An OWID is only worth anything because it is signed, so a caller cannot build
+one. An instance arrives by exactly two routes.
+
+1. Reading bytes that were already a complete OWID, with `Owid.parse`,
+   `Owid.parse_bytes` or `Owid.parse_prefix`.
+2. `Creator.create` and `Creator.create_string`, which own the version, the
+   domain, the date and the signature, and hand back a finished OWID.
+
+Python cannot make a constructor private, so calling `Owid()` raises
+`OwidError` naming the two routes instead. The payload and the signature are
+handed out as copies and the fields are read only properties, because a parsed
+OWID's signature covers its fields as they arrived, so code that could change
+them afterwards would hold something whose signature no longer describes it.
+There is no way to sign an OWID that already exists, as an unsigned OWID is
+indistinguishable from a signed one to the code downstream of it and the
+difference only surfaces later when a verification fails somewhere nobody is
+watching.
+
+## Reading data that may not be an OWID
+
+An OWID is read from whatever a caller was handed, which on a public end point
+means anything at all, so being malformed is an ordinary outcome rather than an
+exceptional one. The parse methods report it instead of raising, because
+raising costs the construction and unwinding of an exception for every bad
+input and whoever sends the data chooses how often that happens.
+
+Every read hands back a `ParseResult`, which is truthy on success and reports
+the same three facts.
+
+1. `result.ok`, whether it worked.
+2. `result.owid`, the OWID on success and `None` on failure.
+3. `result.status`, a `ParseStatus` naming the reason, which is
+   `ParseStatus.PARSED` on success.
+
+A result also carries `result.consumed`, the number of bytes the envelope
+occupied, which a caller reading several OWIDs from one buffer uses to reach
+the next one. Nothing is consumed when an envelope is refused, because a half
+read one leaves a caller somewhere it cannot reason about.
+
+The reasons a read can give are named by `ParseStatus`.
+
+| Status | Meaning |
+| ------ | ------- |
+| `PARSED` | The bytes form a structurally valid OWID. This says nothing about the signature. |
+| `MISSING_INPUT` | Nothing was supplied to parse. |
+| `INVALID_INPUT_TYPE` | The input arrived in a form the surface cannot read, such as bytes where a base 64 string was wanted. |
+| `INVALID_BASE64` | The string is not valid base 64, so there are no bytes to read. |
+| `UNSUPPORTED_VERSION` | The first byte names a version this implementation does not know. |
+| `UNEXPECTED_END` | The data stopped in the middle of a field. |
+| `INVALID_DOMAIN_ENCODING` | The creator domain is not terminated, or is longer than the published maximum. |
+| `BYTE_COUNT_MISMATCH` | The declared payload byte count disagrees with the bytes actually present. |
+| `IMPLEMENTATION_CAPACITY_EXCEEDED` | The envelope is consistent but larger than this runtime can hold, so the same bytes may be readable elsewhere. |
+| `ABSENT_NODE` | The one byte marker standing for a node that is not there. |
+| `MALFORMED_ENVELOPE` | Malformed in a way none of the above describes. |
+
+These names are the cross language vocabulary, so a failure means the same
+thing whichever implementation read the bytes, and code matching on a status
+never has to match on message text.
+
+### The whole buffer contract and the framed contract
+
+`Owid.parse` and `Owid.parse_bytes` require the value to be one whole OWID and
+nothing else, because on those surfaces there is nothing else the bytes after
+the envelope could belong to. The declared payload must leave exactly the
+signature, so a byte after it is `ParseStatus.BYTE_COUNT_MISMATCH`.
+
+`Owid.parse_prefix` reads one OWID from the front of a buffer that may carry
+more after it and leaves the rest alone, because what follows may be the next
+envelope rather than rubbish. It needs only the declared payload and the
+signature to be present, and says nothing about the bytes beyond them. A frame
+whose declaration runs past the bytes supplied is therefore
+`ParseStatus.UNEXPECTED_END`, being data that stopped early rather than a
+declaration disagreeing with data that is all present, which is the answer a
+caller reading a source still arriving needs so that it can wait for more bytes
+instead of giving up.
+
+### The marker for a node that is absent
+
+A single zero byte, written by `Owid.empty_to_buffer`, stands for an optional
+OWID that is not there. Both reads report it as `ParseStatus.ABSENT_NODE` and
+neither hands back an OWID, because the marker carries no domain, date, payload
+or signature and so can never verify, and reading one as an identifier would be
+the one way an instance with no signature could reach calling code. It is not
+an unknown version, as version 0 is supported and meaningful, and it is not a
+malformed frame either.
+
+A framed read counts the marker's one byte as consumed, so a caller walking a
+run of frames steps over an absent node and reaches the next envelope. A whole
+buffer read consumes nothing, as there the marker on its own is the whole of
+what was supplied.
+
+```python
+from owid import Owid, ParseStatus
+
+# A buffer holding one OWID, a node that is absent, then another OWID.
+buffer = bytearray()
+creator.create_string("first").to_buffer(buffer)
+Owid.empty_to_buffer(buffer)
+creator.create_string("second").to_buffer(buffer)
+
+data = bytes(buffer)
+payloads = []
+while data:
+    frame = Owid.parse_prefix(data)
+    if frame:
+        payloads.append(frame.owid.payload_as_string())
+    elif frame.status is not ParseStatus.ABSENT_NODE:
+        break
+    data = data[frame.consumed:]
+
+assert payloads == ["first", "second"]
+```
+
+Reading is not verification. A successfully read OWID is structurally valid and
+nothing more, and whether its signature is genuine is a separate question with
+a separate answer.
+
 ## Interface
 
 `Owid`
 
-- `from_base64(value)` and `from_byte_array(buffer)` parse a signed OWID.
-- `as_base64()` and `as_byte_array()` serialize a signed OWID.
+- `parse(value)` reads a complete OWID from its base 64 form.
+- `parse_bytes(buffer)` reads a complete OWID from a buffer holding exactly
+  one.
+- `parse_prefix(buffer)` reads one OWID from the front of a buffer that may
+  carry more after it.
+- `version`, `domain`, `date`, `payload` and `signature` are read only
+  properties.
+- `as_base64()` and `as_byte_array()` serialize a signed OWID, and
+  `to_buffer(buffer)` appends it to a `bytearray`.
+- `empty_to_buffer(buffer)` writes the one byte marker for a node that is not
+  there.
 - `payload_as_string()` decodes the payload as UTF-8, replacing invalid bytes.
 - `payload_as_printable()` returns the payload as lower case hexadecimal.
 - `payload_as_base64()` returns the payload as a base 64 string.
 - `verify_with_crypto(crypto, others)` and
   `verify_with_public_key(public_pem, others)` return True if the signature is
   valid. Pass an empty list for `others` when the OWID was signed on its own.
+- `signature_status(public_pem, others)` answers the same question with a
+  `SignatureStatus`, which keeps a signature that does not match apart from a
+  check that could not be made at all.
 - `age_minutes()` returns the whole minutes elapsed since creation.
+
+`ParseResult`
+
+- `ok`, `owid`, `status` and `consumed`, described under reading above. The
+  result is truthy when `ok` is True, so `if result:` reads the way Python
+  reads.
+
+`ParseStatus` and `SignatureStatus`
+
+- The named reasons a read or a signature check reports. Both are enumerations
+  whose `value` is the cross language name, for example `"ByteCountMismatch"`.
 
 `Crypto`
 
@@ -141,7 +316,9 @@ assert not party.verify_with_crypto(crypto, [])
 - `new_verify_only(public_pem)` imports an SPKI public key PEM.
 - `sign_byte_array(data)` returns the 64 byte signature.
 - `verify_byte_array(data, signature)` returns True if the signature is valid.
-- `subject_public_key_info()` and `private_key_pem()` export the keys as PEM.
+- `subject_public_key_info()` and `private_key_pem()` export the keys as PEM,
+  and `public_key_pem()` is an alias of the first of those.
+- `can_sign()` and `can_verify()` report which keys the instance holds.
 
 An empty or whitespace PEM is rejected with a clear message rather than an
 opaque crypto error.
@@ -151,9 +328,9 @@ opaque crypto error.
 - `Creator(domain, crypto)` binds a domain to a signing crypto instance.
 - `from_configuration(configuration)` builds a creator from a domain and a
   private key PEM.
-- `sign(owid)` and `sign_with_others(owid, others)` set the domain, date, and
-  version, then sign.
-- `sign_string(value)` and `sign_bytes(value)` create and sign a new OWID.
+- `create(value, others)` creates and signs a new OWID carrying the bytes,
+  covering any others with the same signature.
+- `create_string(value)` does the same with the UTF-8 bytes of a string.
 
 `endpoints`
 
@@ -189,8 +366,19 @@ this OWID without its signature, followed by the complete bytes, including the
 signature, of each other OWID in the order given. The same others in the same
 order must be supplied to verify as were supplied to sign.
 
-An empty OWID is written as a single byte with value 0 and acts as a marker
-for an absent optional OWID inside a larger byte array.
+A single byte with value 0 is the marker for an absent optional OWID inside a
+larger byte array, written by `Owid.empty_to_buffer` and reported by both reads
+as `ParseStatus.ABSENT_NODE`, covered under reading above.
+
+The two reads differ in three answers and agree everywhere else. A whole buffer
+read requires the declared payload to leave exactly the signature, so a byte
+after it is `ParseStatus.BYTE_COUNT_MISMATCH`, while a framed read requires
+only that the payload and the signature are present and says nothing about what
+follows. A frame whose declared payload runs past the bytes supplied is
+`ParseStatus.UNEXPECTED_END`, so `ParseStatus.BYTE_COUNT_MISMATCH` is reachable
+only on the whole buffer read where every byte is present by definition. A
+framed read counts the marker's one byte as consumed and a whole buffer read
+counts nothing.
 
 Base 64 decoding accepts input with or without trailing padding. Encoding
 always emits padding.
@@ -199,7 +387,11 @@ always emits padding.
 
 The tests use the standard library `unittest` and exercise the canonical wire
 vectors, the cross language signed fixtures, the signing path, and the unit
-behaviour of each module. Run them from the repository root.
+behaviour of each module. `tests/test_parse_contract.py` holds the cross
+language status matrix, being the reasons a read reports and the proof that an
+OWID cannot be held unsigned. `tests/test_readme.py` runs the Python examples
+in this file in the order they appear, so documentation naming a method that
+does not exist fails the build. Run them from the repository root.
 
 ```
 python -m unittest discover

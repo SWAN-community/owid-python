@@ -105,40 +105,53 @@ class Creator:
         """Used to sign OWIDs from this creator."""
         return self._crypto
 
-    def sign(self, owid: Owid) -> None:
+    def _sign(self, owid: Owid) -> None:
         """Signs the OWID provided, setting the domain to the creator domain,
         the date to the current time, and the version to the current version,
         then signing it."""
-        self.sign_with_others(owid, [])
+        self._sign_with_others(owid, [])
 
-    def sign_with_others(self, owid: Owid, others: Sequence[Owid]) -> None:
+    def _sign_with_others(self, owid: Owid, others: Sequence[Owid]) -> None:
         """Signs the OWID provided together with the other OWIDs provided.
 
         The same others, in the same order, must be passed when verifying.
         """
-        owid.version = DEFAULT_VERSION
-        owid.domain = self._domain
+        owid._version = DEFAULT_VERSION
+        owid._domain = self._domain
         # Truncate to whole minutes so the in-memory date matches the value
         # written to the wire format. This keeps a signed OWID equal to a copy
         # decoded from its bytes, and ensures signing and verification operate
         # on the same minute precise value.
-        owid.date = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        owid._date = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         data = owid.data_for_crypto(others)
-        owid.signature = self._crypto.sign_byte_array(data)
-        if len(owid.signature) != SIGNATURE_LENGTH:
+        owid._signature = self._crypto.sign_byte_array(data)
+        if len(owid._signature) != SIGNATURE_LENGTH:
             raise OwidError(
                 "signature length '{0}' not compatible with '{1}' OWID "
-                "signature length".format(len(owid.signature), SIGNATURE_LENGTH)
+                "signature length".format(len(owid._signature), SIGNATURE_LENGTH)
             )
 
-    def sign_string(self, value: str) -> Owid:
-        """Creates a new signed OWID for the creator containing the string as
-        the payload."""
-        return self.sign_bytes(value.encode("utf-8"))
+    def create_string(self, value: str) -> Owid:
+        """Creates and signs a new OWID carrying the string as its payload."""
+        if value is None:
+            raise OwidError("a payload is required")
+        return self.create(value.encode("utf-8"))
 
-    def sign_bytes(self, value: bytes) -> Owid:
-        """Creates a new signed OWID for the creator containing the bytes as
-        the payload."""
-        owid = Owid(payload=value)
-        self.sign(owid)
+    def create(self, value: bytes, others: Sequence[Owid] = ()) -> Owid:
+        """Creates and signs a new OWID carrying the bytes as its payload.
+
+        This is one of only two ways an OWID reaches calling code, the other
+        being a successful parse. The creator owns the version, the domain,
+        the date and the signature; a caller supplies the payload and nothing
+        else, so there is no moment at which a partly built OWID exists for
+        anyone to hold or pass on.
+
+        Any others are covered by the signature so that a tree can be verified
+        as a whole, and the same others in the same order must be passed when
+        verifying.
+        """
+        if value is None:
+            raise OwidError("a payload is required")
+        owid = Owid._create(payload=bytes(value))
+        self._sign_with_others(owid, list(others))
         return owid
