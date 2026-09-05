@@ -22,14 +22,22 @@ server can serve them. The mandatory end points are the creator end point at
 public key of the creator, and the public key end point at
 /owid/api/v{version}/public-key returning the public key as PEM text. The
 format query parameter must be spki or pkcs.
+
+A creator that rotates its signing key answers the optional date parameter of
+the public key end point with public_key_response_at, which chooses from the
+published schedule the way the specification requires.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple, Union
 
+from . import io
 from .creator import Creator
 from .error import OwidError
+from .public_key_schedule import PublicKeySchedule
 from .version import Version
 
 
@@ -75,3 +83,62 @@ def public_key_response(creator: Creator, format: str) -> str:
         "format parameter 'spki' or 'pkcs' must be provided, "
         "received '{0}'".format(format)
     )
+
+
+def public_key_response_at(
+    schedule: PublicKeySchedule,
+    format: str,
+    date: Union[str, int, None],
+    now: Optional[datetime] = None,
+) -> Tuple[int, str]:
+    """Returns the status code and text body for the public key end point of
+    a creator that rotates its key, chosen from the schedule the way the
+    specification requires.
+
+    The date parameter is the OWID's own date, counted in whole minutes since
+    2020-01-01, and the key served is the one in force then, being the latest
+    key whose start is at or before it. A request without a date, or with a
+    date later than the moment of the request, is served the key in force at
+    that moment, so a caller cannot ask for a key whose period has not begun.
+    The answer is 200 with the PEM, 404 with an empty body where no key is in
+    force at the date, and 400 with an empty body where the date is not a
+    count of minutes. The moment of the request is now, and a test may supply
+    it.
+
+    Raises OwidError if the format is not spki or pkcs.
+    """
+    if format not in ("spki", "pkcs"):
+        raise OwidError(
+            "format parameter 'spki' or 'pkcs' must be provided, "
+            "received '{0}'".format(format)
+        )
+    moment = now if now is not None else datetime.now(timezone.utc)
+    asked = moment
+    if date is not None and date != "":
+        minutes = _minutes(date)
+        if minutes is None:
+            return 400, ""
+        if minutes <= io.MAXIMUM_MINUTES:
+            asked = io.BASE_DATE + timedelta(minutes=minutes)
+        if asked > moment:
+            asked = moment
+    key = schedule.key_in_force(asked)
+    if key is None:
+        return 404, ""
+    return 200, key.public_key_pem
+
+
+def _minutes(date: Union[str, int]) -> Optional[int]:
+    """The date parameter as a count of minutes, or None where it is not an
+    unsigned 32 bit integer, written in decimal digits when it is text."""
+    if isinstance(date, bool):
+        return None
+    if isinstance(date, int):
+        value = date
+    elif isinstance(date, str) and date.isascii() and date.isdigit():
+        value = int(date)
+    else:
+        return None
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return value

@@ -13,9 +13,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 # ****************************************************************************
-"""The error type raised across the package.
+"""The error types raised across the package.
 
-A single exception type carries a human readable message. It is raised where
+OwidError carries a human readable message. It is raised where
 the fault lies in the calling code or in the local key material, being a
 domain or payload that cannot be written, a key that cannot be imported or
 exported, an attempt to construct an OWID directly, and a version the writer
@@ -25,9 +25,16 @@ Reading data that came from outside does not raise. Bytes that are not an OWID
 are an ordinary outcome, so the parse surfaces answer with a ParseResult
 carrying a ParseStatus, and a signature that cannot be judged is reported as a
 SignatureStatus rather than as an exception.
+
+PublicKeyFetchError is the one subclass. It is raised by public_key_fetch
+when the public key of another creator could not be obtained, and it carries
+the status to report so that the caller never mistakes an outage for a
+forgery.
 """
 
 from __future__ import annotations
+
+from .status import SignatureStatus
 
 
 class OwidError(Exception):
@@ -35,3 +42,26 @@ class OwidError(Exception):
     and never for external data that turns out not to be an OWID."""
 
     pass
+
+
+class PublicKeyFetchError(OwidError):
+    """Raised by owid.public_key_fetch when the public key of a creator could
+    not be obtained.
+
+    Carries the status a caller should report for the identifier, which is
+    never a signature that does not match because the signature was never
+    examined, the domain the key was asked of, and the response code, which
+    is 0 where no response arrived at all.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: SignatureStatus,
+        domain: str,
+        status_code: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.domain = domain
+        self.status_code = status_code

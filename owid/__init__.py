@@ -30,10 +30,11 @@ from __future__ import annotations
 from . import endpoints
 from .creator import Configuration, Creator
 from .crypto import Crypto
-from .error import OwidError
+from .error import OwidError, PublicKeyFetchError
 from .io import SIGNATURE_LENGTH
 from .owid import Owid
 from .parse import ParseResult
+from .public_key_schedule import DatedPublicKey, PublicKeySchedule
 from .status import ParseStatus, SignatureStatus
 from .version import DEFAULT_VERSION, Version
 
@@ -41,18 +42,24 @@ __all__ = [
     "Configuration",
     "Creator",
     "Crypto",
+    "DatedPublicKey",
     "OwidError",
+    "PublicKeyFetchError",
     "Owid",
     # A caller cannot act on a read without naming the reason it carries, so
     # the result and both status vocabularies sit beside the type they
     # describe rather than in a module a reader has to go looking for.
     "ParseResult",
     "ParseStatus",
+    "PublicKeySchedule",
     "SignatureStatus",
     "Version",
     "DEFAULT_VERSION",
     "SIGNATURE_LENGTH",
     "endpoints",
+    # public_key_fetch is imported by the caller that wants it, as
+    # "from owid import public_key_fetch", so importing the package never
+    # loads the network client.
 ]
 
 __version__ = "0.1.0"
