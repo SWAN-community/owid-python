@@ -21,9 +21,12 @@ creates, signs, serializes, and verifies OWIDs.
 
 This package provides the core data structure, the binary and base 64 wire
 format, the ECDSA signing and verification, a creator that binds a domain to a
-signing key, and framework agnostic helpers for the well known end points. It
-has no network access of its own, so retrieving a creator public key over HTTP
-is left to the caller.
+signing key, framework agnostic helpers for the well known end points, and
+the fetch of another creator's public key from its well known end point. The
+core has no network access of its own. The one module that reaches the
+network is `owid.public_key_fetch`, which uses the standard library `urllib`,
+is imported only by a caller that asks for it, and takes a transport of the
+caller's own where `urllib` is not the right client.
 
 Version 3 is the current version produced for new OWIDs. Versions 1 and 2 are
 deprecated and are supported for reading existing data only.
@@ -152,6 +155,85 @@ else:
     # not be answered, which is an operational fault rather than an attack.
     pass
 ```
+
+## Verifying an identifier signed in an earlier week
+
+Creators rotate their signing key, weekly in the case of the 51Degrees cloud,
+so the key that is current when an identifier is checked is not the key that
+signed the identifier unless the check happens in the same week. Verifying
+anything older than a few days means asking for the key that was in force on
+the date the identifier carries.
+
+`owid.public_key_fetch` asks the creator for that key. The request is
+`/owid/api/v{n}/public-key?date={minutes}&format=pkcs`, where the version in
+the path is the version byte of the identifier being checked and the minutes
+are counted from 2020-01-01 in the same way the identifier stores its date. A
+creator that ignores the parameter returns its current key, so every
+identifier it signed under an earlier key reads as not matching, which is why
+a creator that rotates its key has to honour the date. Keys already fetched
+are held against the URL they came from, which names the domain, the version
+and the minute, up to 1024 of them before the store is emptied, and
+`clear_cache()` empties it on demand. Each request waits at most ten seconds.
+
+```python
+from owid import SignatureStatus, public_key_fetch
+
+# A creator on a domain that cannot exist, so the example shows the shape of
+# the call and the status a key that cannot be obtained produces.
+remote_creator = Creator("creator.invalid", Crypto.new())
+remote = remote_creator.create_string("from another creator")
+
+fetched = public_key_fetch.signature_status(remote, "https")
+if fetched is SignatureStatus.KEY_UNAVAILABLE:
+    # The key could not be obtained, so the signature was never examined.
+    # Only SIGNATURE_INVALID means the identifier should be distrusted.
+    pass
+assert fetched is SignatureStatus.KEY_UNAVAILABLE
+```
+
+A caller whose environment needs its own HTTP client passes a transport as
+the last argument, being a callable that takes the URL and the timeout in
+seconds, returns the response code and the body as bytes, and raises
+`OSError` where no response could be obtained at all.
+
+Where the whole published schedule is already held, `PublicKeySchedule`
+chooses the key without any request. The rule is the one the cloud itself
+applies, being the latest key whose start is at or before the date asked
+about.
+
+```python
+from datetime import datetime, timezone
+from owid import DatedPublicKey, PublicKeySchedule
+
+last_week_pem = Crypto.new().public_key_pem()
+schedule = PublicKeySchedule([
+    DatedPublicKey(datetime(2026, 8, 24, tzinfo=timezone.utc), last_week_pem),
+    DatedPublicKey(
+        datetime(2026, 8, 31, tzinfo=timezone.utc), crypto.public_key_pem()
+    ),
+])
+chosen = schedule.key_for(owid)
+assert schedule.signature_status(owid) is SignatureStatus.SIGNATURE_VALID
+```
+
+Both examples are run by `tests/test_readme.py`, as the rest of the examples
+in this file are. The fetch one runs against a creator domain in the reserved
+`.invalid` name space, so it shows the status a key that cannot be obtained
+produces, whilst the case where the key does arrive and the identifier
+verifies is covered by `tests/test_public_key_fetch.py` against a stand in on
+the loopback address.
+
+The only date a key carries here is the date the key came into force. The
+moment key material was generated is not that date and plays no part in the
+choice, because a creator may generate several weeks of keys in one run, and
+a key whose period has not started has signed nothing.
+
+A creator that rotates its key answers the date parameter of its own public
+key end point with `endpoints.public_key_response_at`, which returns the
+status code and body for the request: the key in force at the date asked, the
+key in force now for a request without a date or with a date later than now,
+404 where no key is in force, and 400 where the date is not a count of
+minutes.
 
 ## How an OWID comes into being
 
@@ -340,6 +422,37 @@ opaque crypto error.
   with the `domain`, `name`, `publicKeySPKI`, and `contractURL` fields.
 - `public_key_response(creator, format)` returns the public key PEM. The
   format must be `spki` or `pkcs`.
+- `public_key_response_at(schedule, format, date, now=None)` returns the
+  status code and body for a creator that rotates its key, choosing from a
+  `PublicKeySchedule` the way the specification requires.
+
+`public_key_fetch`
+
+- `public_key_url(owid, scheme)` builds the request, naming the version of the
+  OWID and the minute the OWID was signed.
+- `public_key_pem(owid, scheme, transport=None)` returns the key, raising
+  `PublicKeyFetchError`, which carries the status to report, the domain and
+  the response code.
+- `signature_status(owid, scheme, others=None, transport=None)` answers with
+  the status, so a key that could not be fetched is `KEY_UNAVAILABLE`, one
+  that could not be read is `INVALID_KEY`, and neither is mistaken for a
+  signature that does not match. `verify` takes the same arguments and
+  answers True only for `SIGNATURE_VALID`.
+- `clear_cache()` empties the keys already fetched.
+
+`PublicKeySchedule` and `DatedPublicKey`
+
+- `PublicKeySchedule(keys)` takes the keys in any order.
+- `key_in_force(date)` and `key_for(owid)` return the latest key whose start
+  is at or before the date, or the date of the OWID, and None where the
+  schedule does not reach back that far.
+- `current()` returns the key in force now, and `last()` the key with the
+  latest start, which for a schedule published ahead of time is usually a
+  key that has not begun. `signature_status(owid, others=None)` chooses the
+  key and answers with the status, and `verify` answers True only for
+  `SIGNATURE_VALID`.
+- `DatedPublicKey(starts_at, public_key_pem)` is one key and the date the key
+  came into force, both read only. A naive datetime is read as UTC.
 
 ## Data structure notes
 
@@ -391,7 +504,12 @@ behaviour of each module. `tests/test_parse_contract.py` holds the cross
 language status matrix, being the reasons a read reports and the proof that an
 OWID cannot be held unsigned. `tests/test_readme.py` runs the Python examples
 in this file in the order they appear, so documentation naming a method that
-does not exist fails the build. Run them from the repository root.
+does not exist fails the build. `tests/test_public_key_fetch.py` drives the
+real fetch against a stand in for a creator's public key end point on the
+loopback address, serving the published 51d.es schedule, and
+`tests/test_public_key_schedule.py` checks the choice of key against a genuine
+identifier the 51Degrees cloud issued on 4 September 2026. Run them from the
+repository root.
 
 ```
 python -m unittest discover

@@ -164,6 +164,19 @@ class Reader:
         raise OwidError("OWID version '{0}' not supported".format(version.as_byte()))
 
 
+def minutes_since_base(date: datetime) -> int:
+    """Returns the whole minutes from the base date to the date, or -1 where
+    the count cannot be held in the four byte field of versions 2 and 3, being
+    a date before the base or beyond the field. The arithmetic is the one
+    write_date uses, so the value a fetch names is the value the OWID
+    carries."""
+    delta = date - BASE_DATE
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 0 or minutes > 0xFFFFFFFF:
+        return -1
+    return minutes
+
+
 def write_byte(buffer: bytearray, value: int) -> None:
     """Appends a single byte."""
     buffer.append(value)
