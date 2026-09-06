@@ -20,10 +20,16 @@ The live end point answers 401 without a credential, so these tests run
 against a stand in on the loopback address which serves the real published
 51d.es schedule. The URL under test is the one the package builds, with only
 the host replaced, so a fault in the path or the query is caught here.
+
+The fetch is asynchronous and has no synchronous form, so every test that
+reaches it is a coroutine run by the standard library's
+IsolatedAsyncioTestCase on an event loop of its own.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import pathlib
 import unittest
@@ -70,7 +76,7 @@ def crafted(version: Version, domain: str, date: datetime) -> Owid:
     return result.owid
 
 
-class PublicKeyFetchTests(unittest.TestCase):
+class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # Keys are held against the URL they were fetched from, and a test
         # that counts requests has to start from nothing held.
@@ -88,6 +94,30 @@ class PublicKeyFetchTests(unittest.TestCase):
         end_point = KeyEndPoint(answer)
         self.started.append(end_point)
         return end_point
+
+    def test_every_function_that_reaches_the_network_is_a_coroutine(
+        self,
+    ) -> None:
+        """The fetch has no synchronous form. Building the URL and emptying
+        the cache touch nothing outside the process and stay ordinary
+        functions, and everything that could make a request is awaited."""
+        for reaches_the_network in (
+            public_key_fetch.public_key_pem,
+            public_key_fetch.signature_status,
+            public_key_fetch.verify,
+        ):
+            self.assertTrue(
+                inspect.iscoroutinefunction(reaches_the_network),
+                "{0} must be awaited".format(reaches_the_network.__name__),
+            )
+        for stays_in_process in (
+            public_key_fetch.public_key_url,
+            public_key_fetch.clear_cache,
+        ):
+            self.assertFalse(
+                inspect.iscoroutinefunction(stays_in_process),
+                "{0} makes no request".format(stays_in_process.__name__),
+            )
 
     def test_url_names_the_minute_the_identifier_was_created(self) -> None:
         """The URL names the minute the identifier was created, which is the
@@ -124,7 +154,7 @@ class PublicKeyFetchTests(unittest.TestCase):
             "should name the minute the OWID was signed",
         )
 
-    def test_dated_fetch_verifies_an_identifier_from_an_earlier_key_week(
+    async def test_dated_fetch_verifies_an_identifier_from_an_earlier_key_week(
         self,
     ) -> None:
         """The fetch asks for the key in force when the identifier was signed
@@ -134,7 +164,7 @@ class PublicKeyFetchTests(unittest.TestCase):
         end_point = self.end_point()
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            public_key_fetch._signature_status_at_url(
+            await public_key_fetch._signature_status_at_url(
                 owid, end_point.url_for(owid), ALONE
             ),
             "should verify against the key in force when it was signed",
@@ -145,7 +175,7 @@ class PublicKeyFetchTests(unittest.TestCase):
             "the request should name the minute the identifier was created",
         )
 
-    def test_undated_fetch_leaves_an_earlier_weeks_identifier_unverified(
+    async def test_undated_fetch_leaves_an_earlier_weeks_identifier_unverified(
         self,
     ) -> None:
         """The same identifier against the same end point without the date,
@@ -158,13 +188,17 @@ class PublicKeyFetchTests(unittest.TestCase):
         undated = end_point.base + "/owid/api/v3/public-key?format=pkcs"
         self.assertIs(
             SignatureStatus.SIGNATURE_INVALID,
-            public_key_fetch._signature_status_at_url(owid, undated, ALONE),
+            await public_key_fetch._signature_status_at_url(
+                owid, undated, ALONE
+            ),
             "an undated request gets the key in force at the request, which "
             "did not sign it",
         )
         self.assertEqual([None], end_point.dates(), "the request carried no date")
 
-    def test_a_key_the_end_point_cannot_serve_is_key_unavailable(self) -> None:
+    async def test_a_key_the_end_point_cannot_serve_is_key_unavailable(
+        self,
+    ) -> None:
         """An end point that cannot serve a key for the date leaves the
         signature unjudged rather than reporting a genuine identifier as a
         forgery."""
@@ -178,32 +212,34 @@ class PublicKeyFetchTests(unittest.TestCase):
         )
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
             "no key means the signature was never examined",
         )
 
-    def test_a_refused_request_carries_the_status_and_the_code(self) -> None:
+    async def test_a_refused_request_carries_the_status_and_the_code(
+        self,
+    ) -> None:
         """The refusal carries the code and the domain, not only a message."""
         end_point = self.end_point()
         url = end_point.base + "/owid/api/v3/public-key?date=0&format=pkcs"
         with self.assertRaises(PublicKeyFetchError) as refused:
-            public_key_fetch._public_key_pem_at_url(url, "51d.es")
+            await public_key_fetch._public_key_pem_at_url(url, "51d.es")
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
         self.assertEqual(404, refused.exception.status_code)
         self.assertEqual("51d.es", refused.exception.domain)
 
-    def test_a_malformed_date_is_refused_by_the_end_point(self) -> None:
+    async def test_a_malformed_date_is_refused_by_the_end_point(self) -> None:
         """The stand in refuses a date that is not a count of minutes with a
         400, as the cloud does, and the package reports the refusal as a key
         that could not be obtained."""
         end_point = self.end_point()
         url = end_point.base + "/owid/api/v3/public-key?date=abc&format=pkcs"
         with self.assertRaises(PublicKeyFetchError) as refused:
-            public_key_fetch._public_key_pem_at_url(url, "51d.es")
+            await public_key_fetch._public_key_pem_at_url(url, "51d.es")
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
         self.assertEqual(400, refused.exception.status_code)
 
-    def test_an_end_point_that_cannot_be_reached_is_key_unavailable(
+    async def test_an_end_point_that_cannot_be_reached_is_key_unavailable(
         self,
     ) -> None:
         """An end point that cannot be reached at all leaves the signature
@@ -212,14 +248,17 @@ class PublicKeyFetchTests(unittest.TestCase):
         owid = key_fixtures.identifier()
         end_point = KeyEndPoint()
         url = end_point.url_for(owid)
-        end_point.stop()
+        # Stopping the server waits for its polling loop to notice, up to
+        # half a second, so it is done off the event loop rather than
+        # blocking the loop for that long.
+        await asyncio.to_thread(end_point.stop)
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
             "a connection that is refused leaves the signature unjudged",
         )
 
-    def test_a_redirect_is_not_followed(self) -> None:
+    async def test_a_redirect_is_not_followed(self) -> None:
         """A creator whose domain answers with a redirect does not get the
         key at the other end trusted as its own. The answer is that the key
         is unavailable, carrying the 302, and the request that would have
@@ -229,31 +268,31 @@ class PublicKeyFetchTests(unittest.TestCase):
         owid = key_fixtures.identifier()
         end_point = self.end_point(Answer.REDIRECT)
         with self.assertRaises(PublicKeyFetchError) as refused:
-            public_key_fetch._public_key_pem_at_url(
+            await public_key_fetch._public_key_pem_at_url(
                 end_point.url_for(owid), owid.domain
             )
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
         self.assertEqual(302, refused.exception.status_code)
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch._signature_status_at_url(
+            await public_key_fetch._signature_status_at_url(
                 owid, end_point.url_for(owid), ALONE
             ),
         )
 
-    def test_a_key_that_cannot_be_read_is_invalid_key(self) -> None:
+    async def test_a_key_that_cannot_be_read_is_invalid_key(self) -> None:
         """Text shaped like a PEM that holds no key is a fault in the key, and
         never a signature that does not match."""
         owid = key_fixtures.identifier()
         end_point = self.end_point(Answer.BROKEN_KEY)
         self.assertIs(
             SignatureStatus.INVALID_KEY,
-            public_key_fetch._signature_status_at_url(
+            await public_key_fetch._signature_status_at_url(
                 owid, end_point.url_for(owid), ALONE
             ),
         )
 
-    def test_keys_are_held_per_request_and_not_per_domain(self) -> None:
+    async def test_keys_are_held_per_request_and_not_per_domain(self) -> None:
         """Keys are held against the URL they came from, which names the
         minute, so two identifiers from different weeks fetch two different
         keys and a key held for one week never answers for another. A store
@@ -268,15 +307,15 @@ class PublicKeyFetchTests(unittest.TestCase):
         later = crafted(
             Version.VERSION3, key_fixtures.IDENTIFIER_DOMAIN, IDENTIFIER_DATE
         )
-        first = public_key_fetch._public_key_pem_at_url(
+        first = await public_key_fetch._public_key_pem_at_url(
             end_point.url_for(earlier), key_fixtures.IDENTIFIER_DOMAIN
         )
-        second = public_key_fetch._public_key_pem_at_url(
+        second = await public_key_fetch._public_key_pem_at_url(
             end_point.url_for(later), key_fixtures.IDENTIFIER_DOMAIN
         )
         self.assertNotEqual(first, second, "two weeks, two keys")
         self.assertEqual(2, len(end_point.dates()), "one request per week")
-        again = public_key_fetch._public_key_pem_at_url(
+        again = await public_key_fetch._public_key_pem_at_url(
             end_point.url_for(earlier), key_fixtures.IDENTIFIER_DOMAIN
         )
         self.assertEqual(first, again, "the held key is the one fetched for that week")
@@ -285,7 +324,7 @@ class PublicKeyFetchTests(unittest.TestCase):
         )
         self.assertIn("BEGIN PUBLIC KEY", first)
 
-    def test_the_cache_is_bounded(self) -> None:
+    async def test_the_cache_is_bounded(self) -> None:
         """When the store reaches its bound it is emptied and filled again, so
         a long running verifier never holds more than the bound."""
         end_point = self.end_point()
@@ -299,18 +338,159 @@ class PublicKeyFetchTests(unittest.TestCase):
         ]
         with mock.patch.object(public_key_fetch, "MAXIMUM_CACHED_KEYS", 2):
             for week in weeks:
-                public_key_fetch._public_key_pem_at_url(
+                await public_key_fetch._public_key_pem_at_url(
                     end_point.url_for(week), key_fixtures.IDENTIFIER_DOMAIN
                 )
             self.assertEqual(3, len(end_point.dates()))
             # The third arrival emptied the store, so the first week is
             # fetched again rather than answered from what was held.
-            public_key_fetch._public_key_pem_at_url(
+            await public_key_fetch._public_key_pem_at_url(
                 end_point.url_for(weeks[0]), key_fixtures.IDENTIFIER_DOMAIN
             )
             self.assertEqual(4, len(end_point.dates()))
 
-    def test_a_domain_that_is_not_a_domain_name_is_refused_before_any_request(
+    async def test_concurrent_awaits_for_one_key_share_one_request(
+        self,
+    ) -> None:
+        """Two callers who await the same key while the request for it is in
+        flight share that request, and both receive its answer. The transport
+        is held open until both have asked, so the second caller cannot be
+        answered from the cache and has to join the request itself."""
+        owid = key_fixtures.identifier()
+        pem = key_fixtures.schedule().key_for(owid).public_key_pem
+        arrived = asyncio.Event()
+        release = asyncio.Event()
+        calls: List[str] = []
+
+        async def held_open(url: str, timeout: float) -> Tuple[int, bytes]:
+            calls.append(url)
+            arrived.set()
+            await release.wait()
+            return 200, pem.encode("utf-8")
+
+        first = asyncio.ensure_future(
+            public_key_fetch.public_key_pem(owid, "https", held_open)
+        )
+        second = asyncio.ensure_future(
+            public_key_fetch.public_key_pem(owid, "https", held_open)
+        )
+        await arrived.wait()
+        self.assertFalse(first.done(), "the request is still in flight")
+        self.assertFalse(second.done(), "the second caller is waiting on it")
+        release.set()
+        self.assertEqual([pem, pem], await asyncio.gather(first, second))
+        self.assertEqual(
+            [public_key_fetch.public_key_url(owid, "https")],
+            calls,
+            "one request for the URL the package builds, shared by both",
+        )
+        self.assertTrue(
+            await public_key_fetch.verify(owid, "https", ALONE, held_open),
+            "a later caller is answered from the cache",
+        )
+        self.assertEqual(1, len(calls), "the cache answered the third caller")
+
+    async def test_concurrent_awaits_share_one_request_to_the_end_point(
+        self,
+    ) -> None:
+        """The same sharing over the default transport, against the stand in
+        end point, which records one request for the three callers."""
+        owid = key_fixtures.identifier()
+        end_point = self.end_point()
+        url = end_point.url_for(owid)
+        pems = await asyncio.gather(
+            *[
+                public_key_fetch._public_key_pem_at_url(url, owid.domain)
+                for _ in range(3)
+            ]
+        )
+        self.assertEqual(3, len(pems))
+        self.assertEqual(1, len(set(pems)), "every caller received the key")
+        self.assertIn("BEGIN PUBLIC KEY", pems[0])
+        self.assertEqual(
+            [str(key_fixtures.IDENTIFIER_MINUTES)],
+            end_point.dates(),
+            "three callers, one request",
+        )
+
+    async def test_a_failure_in_flight_reaches_every_waiter(self) -> None:
+        """A request that fails is reported to every caller waiting on it, and
+        then forgotten, so the next caller makes a request of its own rather
+        than being handed the old failure."""
+        owid = key_fixtures.identifier()
+        release = asyncio.Event()
+        calls: List[str] = []
+
+        async def held_then_refused(
+            url: str, timeout: float
+        ) -> Tuple[int, bytes]:
+            calls.append(url)
+            await release.wait()
+            raise OSError("no route")
+
+        first = asyncio.ensure_future(
+            public_key_fetch.signature_status(
+                owid, "https", ALONE, held_then_refused
+            )
+        )
+        second = asyncio.ensure_future(
+            public_key_fetch.signature_status(
+                owid, "https", ALONE, held_then_refused
+            )
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        release.set()
+        self.assertEqual(
+            [SignatureStatus.KEY_UNAVAILABLE, SignatureStatus.KEY_UNAVAILABLE],
+            await asyncio.gather(first, second),
+        )
+        self.assertEqual(1, len(calls), "one request, shared by both callers")
+        self.assertIs(
+            SignatureStatus.KEY_UNAVAILABLE,
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, held_then_refused
+            ),
+        )
+        self.assertEqual(
+            2,
+            len(calls),
+            "a failed request is not held, so the next caller asks again",
+        )
+
+    async def test_cancelling_one_waiter_leaves_the_request_running(
+        self,
+    ) -> None:
+        """Cancelling a caller must not cancel the request another caller is
+        waiting on, and a request on a worker thread could not be stopped
+        part way in any case, so the request completes and its answer is
+        held for the caller that is still waiting."""
+        owid = key_fixtures.identifier()
+        pem = key_fixtures.schedule().key_for(owid).public_key_pem
+        release = asyncio.Event()
+        calls: List[str] = []
+
+        async def held_open(url: str, timeout: float) -> Tuple[int, bytes]:
+            calls.append(url)
+            await release.wait()
+            return 200, pem.encode("utf-8")
+
+        first = asyncio.ensure_future(
+            public_key_fetch.public_key_pem(owid, "https", held_open)
+        )
+        second = asyncio.ensure_future(
+            public_key_fetch.public_key_pem(owid, "https", held_open)
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        release.set()
+        self.assertEqual(pem, await second)
+        self.assertEqual(1, len(calls))
+
+    async def test_a_domain_that_is_not_a_domain_name_is_refused_before_any_request(
         self,
     ) -> None:
         """The domain arrives inside an OWID, which came from outside, so a
@@ -320,15 +500,17 @@ class PublicKeyFetchTests(unittest.TestCase):
         with self.assertRaises(OwidError):
             public_key_fetch.public_key_url(owid, "https")
 
-        def no_request(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def no_request(url: str, timeout: float) -> Tuple[int, bytes]:
             self.fail("no request should be made for a refused domain")
 
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch.signature_status(owid, "https", ALONE, no_request),
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, no_request
+            ),
         )
 
-    def test_a_scheme_that_does_not_make_an_http_request_is_refused(
+    async def test_a_scheme_that_does_not_make_an_http_request_is_refused(
         self,
     ) -> None:
         """A caller chooses the scheme, and one that reads something other
@@ -339,14 +521,14 @@ class PublicKeyFetchTests(unittest.TestCase):
         self.assertTrue(url.startswith("file:"))
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
         )
         with self.assertRaises(PublicKeyFetchError) as refused:
-            public_key_fetch._public_key_pem_at_url(url, owid.domain)
+            await public_key_fetch._public_key_pem_at_url(url, owid.domain)
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
         self.assertEqual(0, refused.exception.status_code)
 
-    def test_a_missing_owid_or_scheme_is_refused(self) -> None:
+    async def test_a_missing_owid_or_scheme_is_refused(self) -> None:
         owid = key_fixtures.identifier()
         with self.assertRaises(OwidError):
             public_key_fetch.public_key_url(None, "https")  # type: ignore[arg-type]
@@ -356,10 +538,12 @@ class PublicKeyFetchTests(unittest.TestCase):
             public_key_fetch.public_key_url(owid, "   ")
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch.signature_status(None, "https"),  # type: ignore[arg-type]
+            await public_key_fetch.signature_status(
+                None, "https"  # type: ignore[arg-type]
+            ),
         )
 
-    def test_a_transport_of_the_callers_own_is_used(self) -> None:
+    async def test_a_transport_of_the_callers_own_is_used(self) -> None:
         """A caller whose environment needs its own HTTP client supplies a
         transport, which is asked for the URL the package builds and whose
         answer is held like any other."""
@@ -367,16 +551,18 @@ class PublicKeyFetchTests(unittest.TestCase):
         pem = key_fixtures.schedule().key_for(owid).public_key_pem
         calls: List[Tuple[str, float]] = []
 
-        def transport(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def transport(url: str, timeout: float) -> Tuple[int, bytes]:
             calls.append((url, timeout))
             return 200, pem.encode("utf-8")
 
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            public_key_fetch.signature_status(owid, "https", ALONE, transport),
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, transport
+            ),
         )
         self.assertTrue(
-            public_key_fetch.verify(owid, "https", ALONE, transport)
+            await public_key_fetch.verify(owid, "https", ALONE, transport)
         )
         self.assertEqual(
             [
@@ -389,56 +575,64 @@ class PublicKeyFetchTests(unittest.TestCase):
             "one request, for the URL the package builds, then the cache",
         )
 
-    def test_verify_answers_true_only_for_a_genuine_signature(self) -> None:
+    async def test_verify_answers_true_only_for_a_genuine_signature(
+        self,
+    ) -> None:
         owid = key_fixtures.identifier()
         schedule = key_fixtures.schedule()
         keys = schedule.keys
         signing = schedule.key_for(owid)
         following = keys[keys.index(signing) + 1]
 
-        def wrong_week(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def wrong_week(url: str, timeout: float) -> Tuple[int, bytes]:
             return 200, following.public_key_pem.encode("utf-8")
 
         self.assertFalse(
-            public_key_fetch.verify(owid, "https", ALONE, wrong_week),
+            await public_key_fetch.verify(owid, "https", ALONE, wrong_week),
             "the following week's key did not sign the identifier",
         )
 
-    def test_a_transport_that_raises_is_key_unavailable(self) -> None:
+    async def test_a_transport_that_raises_is_key_unavailable(self) -> None:
         owid = key_fixtures.identifier()
 
-        def unreachable(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def unreachable(url: str, timeout: float) -> Tuple[int, bytes]:
             raise OSError("no route")
 
-        def unusable(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def unusable(url: str, timeout: float) -> Tuple[int, bytes]:
             raise ValueError("unknown url type")
 
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch.signature_status(owid, "https", ALONE, unreachable),
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, unreachable
+            ),
         )
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch.signature_status(owid, "https", ALONE, unusable),
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, unusable
+            ),
         )
 
-    def test_a_response_larger_than_a_key_is_refused(self) -> None:
+    async def test_a_response_larger_than_a_key_is_refused(self) -> None:
         """A body beyond the bound is not a key, and is neither held nor
         decoded."""
         owid = key_fixtures.identifier()
         too_large = b"x" * (public_key_fetch.MAXIMUM_RESPONSE_BYTES + 1)
 
-        def oversized(url: str, timeout: float) -> Tuple[int, bytes]:
+        async def oversized(url: str, timeout: float) -> Tuple[int, bytes]:
             return 200, too_large
 
         with self.assertRaises(PublicKeyFetchError) as refused:
-            public_key_fetch.public_key_pem(owid, "https", oversized)
+            await public_key_fetch.public_key_pem(owid, "https", oversized)
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
         self.assertEqual(200, refused.exception.status_code)
         public_key_fetch.clear_cache()
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            public_key_fetch.signature_status(owid, "https", ALONE, oversized),
+            await public_key_fetch.signature_status(
+                owid, "https", ALONE, oversized
+            ),
         )
 
 

@@ -24,9 +24,10 @@ format, the ECDSA signing and verification, a creator that binds a domain to a
 signing key, framework agnostic helpers for the well known end points, and
 the fetch of another creator's public key from its well known end point. The
 core has no network access of its own. The one module that reaches the
-network is `owid.public_key_fetch`, which uses the standard library `urllib`,
-is imported only by a caller that asks for it, and takes a transport of the
-caller's own where `urllib` is not the right client.
+network is `owid.public_key_fetch`, whose functions are coroutines a caller
+awaits. It is imported only by a caller that asks for it, runs the standard
+library `urllib` on a worker thread unless the caller supplies a transport of
+its own, and adds no dependency.
 
 Version 3 is the current version produced for new OWIDs. Versions 1 and 2 are
 deprecated and are supported for reading existing data only.
@@ -173,9 +174,14 @@ identifier it signed under an earlier key reads as not matching, which is why
 a creator that rotates its key has to honour the date. Keys already fetched
 are held against the URL they came from, which names the domain, the version
 and the minute, up to 1024 of them before the store is emptied, and
-`clear_cache()` empties it on demand. Each request waits at most ten seconds.
+`clear_cache()` empties it on demand. Two callers who await the same key at
+the same moment share one request rather than making two. Each request waits
+at most ten seconds. Every function that reaches the network is a coroutine,
+so a caller awaits it, and there is no synchronous form.
 
 ```python
+import asyncio
+
 from owid import SignatureStatus, public_key_fetch
 
 # A creator whose key this example never actually asks for. The transport
@@ -185,11 +191,11 @@ from owid import SignatureStatus, public_key_fetch
 remote_creator = Creator("creator.invalid", Crypto.new())
 remote = remote_creator.create_string("from another creator")
 
-def unreachable(url, timeout):
+async def unreachable(url, timeout):
     raise OSError("this example makes no request")
 
-fetched = public_key_fetch.signature_status(
-    remote, "https", transport=unreachable
+fetched = asyncio.run(
+    public_key_fetch.signature_status(remote, "https", transport=unreachable)
 )
 if fetched is SignatureStatus.KEY_UNAVAILABLE:
     # The key could not be obtained, so the signature was never examined.
@@ -199,9 +205,16 @@ assert fetched is SignatureStatus.KEY_UNAVAILABLE
 ```
 
 A caller whose environment needs its own HTTP client passes a transport as
-the last argument, being a callable that takes the URL and the timeout in
-seconds, returns the response code and the body as bytes, and raises
-`OSError` where no response could be obtained at all.
+the last argument, being an `async` callable that takes the URL and the
+timeout in seconds, returns the response code and the body as bytes, and
+raises `OSError` where no response could be obtained at all. The default
+transport runs `urllib` on a worker thread through `asyncio.to_thread`, which
+is blocking I/O on a worker thread rather than a non-blocking request, so the
+event loop is free during the request but a thread is not. Supply an
+`aiohttp` or `httpx` based transport for a fully non-blocking one. The
+default transport never follows a redirect, so a creator whose domain answers
+with a 3xx reads as a key that is unavailable rather than as a key served by
+whatever host the redirect named.
 
 Where the whole published schedule is already held, `PublicKeySchedule`
 chooses the key without any request. The rule is the one the cloud itself
@@ -437,15 +450,16 @@ opaque crypto error.
 
 - `public_key_url(owid, scheme)` builds the request, naming the version of the
   OWID and the minute the OWID was signed.
-- `public_key_pem(owid, scheme, transport=None)` returns the key, raising
-  `PublicKeyFetchError`, which carries the status to report, the domain and
-  the response code.
-- `signature_status(owid, scheme, others=None, transport=None)` answers with
-  the status, so a key that could not be fetched is `KEY_UNAVAILABLE`, one
-  that could not be read is `INVALID_KEY`, and neither is mistaken for a
-  signature that does not match. `verify` takes the same arguments and
-  answers True only for `SIGNATURE_VALID`.
-- `clear_cache()` empties the keys already fetched.
+- `await public_key_pem(owid, scheme, transport=None)` returns the key,
+  raising `PublicKeyFetchError`, which carries the status to report, the
+  domain and the response code.
+- `await signature_status(owid, scheme, others=None, transport=None)` answers
+  with the status, so a key that could not be fetched is `KEY_UNAVAILABLE`,
+  one that could not be read is `INVALID_KEY`, and neither is mistaken for a
+  signature that does not match. `verify` takes the same arguments, is
+  awaited in the same way, and answers True only for `SIGNATURE_VALID`.
+- `clear_cache()` empties the keys already fetched and forgets the requests
+  still in flight. It makes no request and is not awaited.
 
 `PublicKeySchedule` and `DatedPublicKey`
 

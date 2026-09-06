@@ -27,11 +27,19 @@ its current key, so every identifier it signed under an earlier key reads as
 not matching, which is why a creator that rotates its key has to honour the
 date.
 
-Only the standard library is used, through urllib, so the package keeps its
-promise of no dependency beyond cryptography. This module is the one place in
-the package that reaches the network. It is imported only when a caller asks
-for it, and every function takes a transport of the caller's own for an
-environment where urllib is not the right client.
+Every function in this module that reaches the network is a coroutine, so a
+caller awaits it, and there is no synchronous form of any of them. The
+default transport runs the standard library urllib on a worker thread through
+asyncio.to_thread, which is blocking I/O on a worker thread rather than a
+non-blocking request, so the event loop is free for the length of the request
+but a thread is not. Supply an aiohttp or httpx based transport for a fully
+non-blocking one. Only the standard library is used here, so the package
+keeps its promise of no dependency beyond cryptography. This module is the
+one place in the package that reaches the network, and it is imported only
+when a caller asks for it.
+
+Keys already fetched are held, and two callers who await the same key at the
+same moment share one request rather than making two.
 
 The Java port answers the same question with PublicKeyFetch, the Rust port
 with Owid::verify_status and the Go port with SignatureStatusFromDomain.
@@ -39,12 +47,13 @@ with Owid::verify_status and the Go port with SignatureStatusFromDomain.
 
 from __future__ import annotations
 
+import asyncio
 import http.client
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Callable, Dict, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Dict, Optional, Sequence, Tuple
 
 from . import endpoints, io
 from .error import OwidError, PublicKeyFetchError
@@ -63,12 +72,14 @@ MAXIMUM_CACHED_KEYS = 1024
 #: bytes, so a body beyond this is not a key and is not held or decoded.
 MAXIMUM_RESPONSE_BYTES = 65536
 
-#: A transport takes the URL and the timeout in seconds and returns the
-#: response code and the body. It raises OSError where no response could be
-#: obtained at all, which is what urllib raises for a refused connection, a
-#: name that does not resolve and a timeout. Supply one where urllib is not
-#: the right client, for example behind a proxy that needs its own set up.
-Transport = Callable[[str, float], Tuple[int, bytes]]
+#: A transport is an async callable that takes the URL and the timeout in
+#: seconds and returns the response code and the body. It raises OSError
+#: where no response could be obtained at all, which is what urllib raises
+#: for a refused connection, a name that does not resolve and a timeout.
+#: Supply one where urllib on a worker thread is not the right client, for
+#: example an aiohttp or httpx based transport for a fully non-blocking
+#: request, or behind a proxy that needs its own set up.
+Transport = Callable[[str, float], Awaitable[Tuple[int, bytes]]]
 
 #: The schemes that make an HTTP request. A caller chooses the scheme, and one
 #: that reads something other than a creator, such as file, is refused rather
@@ -83,6 +94,18 @@ _ACCEPTED_SCHEMES = ("http", "https")
 #: the version and the minute, and the key a creator published for a minute
 #: in the past does not change.
 _cache: Dict[str, str] = {}
+
+#: Fetches still running, held against the URL, so that a caller who asks for
+#: a key while the request for it is in flight awaits that request rather
+#: than making another. An entry is removed when its fetch finishes, whatever
+#: the outcome. A task belongs to the event loop that created it, so a caller
+#: on a different loop, which only happens where two loops run in two
+#: threads, cannot await it and starts a fetch of its own.
+_in_flight: Dict[str, "asyncio.Task[str]"] = {}
+
+#: Guards both stores. An event loop runs one coroutine at a time, but the
+#: stores are shared by every loop in the process, and the lock is only ever
+#: held across a few dictionary operations and never across an await.
 _lock = threading.Lock()
 
 
@@ -124,7 +147,7 @@ def public_key_url(owid: Owid, scheme: str) -> str:
     )
 
 
-def public_key_pem(
+async def public_key_pem(
     owid: Owid, scheme: str, transport: Optional[Transport] = None
 ) -> str:
     """Returns the public key PEM of the creator of the OWID, for the date the
@@ -134,12 +157,12 @@ def public_key_pem(
     status to report for the identifier, and OwidError if the OWID, the scheme
     or the domain is not usable.
     """
-    return _public_key_pem_at_url(
+    return await _public_key_pem_at_url(
         public_key_url(owid, scheme), owid.domain, transport
     )
 
 
-def signature_status(
+async def signature_status(
     owid: Owid,
     scheme: str,
     others: Optional[Sequence[Owid]] = None,
@@ -161,10 +184,10 @@ def signature_status(
         url = public_key_url(owid, scheme)
     except OwidError:
         return SignatureStatus.KEY_UNAVAILABLE
-    return _signature_status_at_url(owid, url, others, transport)
+    return await _signature_status_at_url(owid, url, others, transport)
 
 
-def verify(
+async def verify(
     owid: Owid,
     scheme: str,
     others: Optional[Sequence[Owid]] = None,
@@ -174,19 +197,21 @@ def verify(
     creator served for the date the OWID carries. Every other outcome, a
     signature that does not match included, is False, so ask
     signature_status where the difference changes what the caller does."""
-    status = signature_status(owid, scheme, others, transport)
+    status = await signature_status(owid, scheme, others, transport)
     return status is SignatureStatus.SIGNATURE_VALID
 
 
 def clear_cache() -> None:
-    """Empties the cache of keys already fetched. Provided so that a long
-    running process can release the memory, and so that a test can start from
-    a known state."""
+    """Empties the cache of keys already fetched, and forgets the fetches
+    still in flight so that the next caller for any key starts a request of
+    its own. Provided so that a long running process can release the memory,
+    and so that a test can start from a known state."""
     with _lock:
         _cache.clear()
+        _in_flight.clear()
 
 
-def _signature_status_at_url(
+async def _signature_status_at_url(
     owid: Owid,
     url: str,
     others: Optional[Sequence[Owid]] = None,
@@ -196,7 +221,7 @@ def _signature_status_at_url(
     that the tests drive the real fetch against a key end point the tests can
     stand up locally rather than against a near copy of the fetch."""
     try:
-        pem = _public_key_pem_at_url(url, owid.domain, transport)
+        pem = await _public_key_pem_at_url(url, owid.domain, transport)
     except PublicKeyFetchError as failed:
         return failed.status
     except OwidError:
@@ -204,24 +229,61 @@ def _signature_status_at_url(
     return owid.signature_status(pem, others)
 
 
-def _public_key_pem_at_url(
+async def _public_key_pem_at_url(
     url: str, domain: str, transport: Optional[Transport] = None
 ) -> str:
     """Fetches the PEM at the URL, answering from the cache where the same URL
-    has already been fetched."""
+    has already been fetched, and awaiting the request already in flight
+    where another caller on this event loop is fetching the same URL now."""
+    loop = asyncio.get_running_loop()
     with _lock:
         cached = _cache.get(url)
-    if cached is not None:
-        return cached
-    pem = _read(url, domain, transport)
-    with _lock:
-        if len(_cache) >= MAXIMUM_CACHED_KEYS:
-            _cache.clear()
-        _cache[url] = pem
-    return pem
+        if cached is not None:
+            return cached
+        fetch = _in_flight.get(url)
+        if fetch is None or fetch.get_loop() is not loop:
+            fetch = loop.create_task(_fetch_and_hold(url, domain, transport))
+            fetch.add_done_callback(_mark_observed)
+            _in_flight[url] = fetch
+    # Shielded, because cancelling one caller must not cancel the request
+    # that other callers are waiting on, and a request on a worker thread
+    # cannot be stopped part way in any case. The answer still lands in the
+    # cache for the next caller.
+    return await asyncio.shield(fetch)
 
 
-def _read(url: str, domain: str, transport: Optional[Transport]) -> str:
+async def _fetch_and_hold(
+    url: str, domain: str, transport: Optional[Transport]
+) -> str:
+    """The one request for a URL, run as a task that every caller waiting for
+    that URL awaits. Holds the answer, and forgets the task whatever the
+    outcome so that a failed fetch is tried again by the next caller."""
+    task = asyncio.current_task()
+    pem: Optional[str] = None
+    try:
+        pem = await _read(url, domain, transport)
+        return pem
+    finally:
+        with _lock:
+            if _in_flight.get(url) is task:
+                del _in_flight[url]
+            if pem is not None:
+                if len(_cache) >= MAXIMUM_CACHED_KEYS:
+                    _cache.clear()
+                _cache[url] = pem
+
+
+def _mark_observed(task: "asyncio.Task[str]") -> None:
+    """Reads the outcome of a finished fetch, so that a failure nobody was
+    left waiting for, because every caller was cancelled, is not reported by
+    asyncio as an exception that was never retrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _read(
+    url: str, domain: str, transport: Optional[Transport]
+) -> str:
     """Performs the request and returns the body as text."""
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in _ACCEPTED_SCHEMES:
@@ -235,7 +297,9 @@ def _read(url: str, domain: str, transport: Optional[Transport]) -> str:
             domain,
         )
     try:
-        code, body = (transport or _urllib_transport)(url, TIMEOUT_SECONDS)
+        code, body = await (transport or _urllib_transport)(
+            url, TIMEOUT_SECONDS
+        )
     except (OSError, ValueError, http.client.HTTPException) as failed:
         # A refused connection, a name that does not resolve and a timeout
         # all arrive here, and all of them mean the signature was never
@@ -287,11 +351,20 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirects())
 
 
-def _urllib_transport(url: str, timeout: float) -> Tuple[int, bytes]:
-    """The transport used unless the caller supplies one. A refusal carrying
-    a response code is returned as that code, and only the failure to obtain
-    any response at all is raised. Redirects are not followed (see
-    _NoRedirects)."""
+async def _urllib_transport(url: str, timeout: float) -> Tuple[int, bytes]:
+    """The transport used unless the caller supplies one. It runs urllib on
+    a worker thread, which is blocking I/O on a worker thread rather than a
+    non-blocking request, so the event loop is free during the request but a
+    thread is not. Supply an aiohttp or httpx based transport for a fully
+    non-blocking one. Redirects are not followed (see _NoRedirects)."""
+    return await asyncio.to_thread(_urllib_request, url, timeout)
+
+
+def _urllib_request(url: str, timeout: float) -> Tuple[int, bytes]:
+    """The blocking request behind the default transport, run on a worker
+    thread and never on the event loop. A refusal carrying a response code
+    is returned as that code, and only the failure to obtain any response at
+    all is raised."""
     request = urllib.request.Request(
         url, headers={"Accept": "text/plain"}, method="GET"
     )
