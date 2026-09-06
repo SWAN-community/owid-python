@@ -119,6 +119,32 @@ class PublicKeyScheduleTests(unittest.TestCase):
             "the key in force now is the one that has started",
         )
 
+    def test_verified_under_the_published_starts_and_invalid_when_shifted(
+        self,
+    ) -> None:
+        """The two pass check that tells selecting by start from anything
+        else. Under the published schedule the genuine identifier verifies.
+        Move every start one week later, keeping every key, and the same
+        identifier must read as not matching, because the key now chosen
+        for its date is the one that was in force the week before. A
+        selection that ignored the starts would answer the same both
+        times."""
+        owid = key_fixtures.identifier()
+        published = key_fixtures.scheduled_keys()
+        as_published = PublicKeySchedule(
+            DatedPublicKey(key.starts_at, key.pem) for key in published
+        )
+        shifted = PublicKeySchedule(
+            DatedPublicKey(key.starts_at + timedelta(days=7), key.pem)
+            for key in published
+        )
+        self.assertIs(
+            SignatureStatus.SIGNATURE_VALID, as_published.signature_status(owid)
+        )
+        self.assertIs(
+            SignatureStatus.SIGNATURE_INVALID, shifted.signature_status(owid)
+        )
+
     def test_selection_ignores_the_moment_the_keys_were_generated(self) -> None:
         """The shape that broke the .NET port. Thirteen of the published keys
         were generated in one batch on 1 September 2026 and cover the weeks

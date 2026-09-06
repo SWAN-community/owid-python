@@ -103,6 +103,15 @@ def public_key_url(owid: Owid, scheme: str) -> str:
         raise OwidError("the OWID is missing")
     if scheme is None or not scheme.strip():
         raise OwidError("the scheme is missing")
+    if scheme.strip().lower() not in _ACCEPTED_SCHEMES:
+        # Checked here as well as before the request, so a caller who
+        # only wants the URL cannot be handed one that names some other
+        # host through a scheme that is really a prefix.
+        raise OwidError(
+            "the scheme must be http or https, received {0}".format(
+                _quoted(scheme)
+            )
+        )
     domain = owid.domain
     _check_domain(domain)
     minutes = io.minutes_since_base(owid.date)
@@ -259,15 +268,35 @@ def _read(url: str, domain: str, transport: Optional[Transport]) -> str:
     return body.decode("utf-8", errors="replace")
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect, so the key is only ever read from the
+    creator domain the OWID names and over the scheme the caller chose.
+
+    urllib follows a redirect to any host and any of http, https or ftp,
+    so without this a creator whose domain answered 302 to some other
+    host, or to plain http, would have that other place's key trusted
+    as its own, and a network attacker could put a key there. Returning
+    None makes urlopen raise the 3xx as an HTTPError, which the transport
+    hands back as the response code and the caller reads as the key
+    being unavailable, which is what it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirects())
+
+
 def _urllib_transport(url: str, timeout: float) -> Tuple[int, bytes]:
     """The transport used unless the caller supplies one. A refusal carrying
     a response code is returned as that code, and only the failure to obtain
-    any response at all is raised."""
+    any response at all is raised. Redirects are not followed (see
+    _NoRedirects)."""
     request = urllib.request.Request(
         url, headers={"Accept": "text/plain"}, method="GET"
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             return response.status, response.read(MAXIMUM_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as refused:
         # A response arrived, so the code is the answer. The body of a

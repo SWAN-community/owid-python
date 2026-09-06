@@ -113,6 +113,10 @@ def public_key_response_at(
             "received '{0}'".format(format)
         )
     moment = now if now is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        # Read as UTC, the only zone the wire format knows, so this agrees
+        # with the schedule rather than refusing to compare.
+        moment = moment.replace(tzinfo=timezone.utc)
     asked = moment
     if date is not None and date != "":
         minutes = _minutes(date)

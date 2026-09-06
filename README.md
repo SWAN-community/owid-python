@@ -178,12 +178,19 @@ and the minute, up to 1024 of them before the store is emptied, and
 ```python
 from owid import SignatureStatus, public_key_fetch
 
-# A creator on a domain that cannot exist, so the example shows the shape of
-# the call and the status a key that cannot be obtained produces.
+# A creator whose key this example never actually asks for. The transport
+# below stands in for the network and refuses, so the example shows the
+# shape of the call and the status a key that cannot be obtained produces
+# without touching a resolver or a proxy.
 remote_creator = Creator("creator.invalid", Crypto.new())
 remote = remote_creator.create_string("from another creator")
 
-fetched = public_key_fetch.signature_status(remote, "https")
+def unreachable(url, timeout):
+    raise OSError("this example makes no request")
+
+fetched = public_key_fetch.signature_status(
+    remote, "https", transport=unreachable
+)
 if fetched is SignatureStatus.KEY_UNAVAILABLE:
     # The key could not be obtained, so the signature was never examined.
     # Only SIGNATURE_INVALID means the identifier should be distrusted.
