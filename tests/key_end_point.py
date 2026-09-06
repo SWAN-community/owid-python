@@ -58,6 +58,9 @@ class Answer(Enum):
     SCHEDULE = "schedule"
     #: Text shaped like a PEM that no key can be read out of.
     BROKEN_KEY = "broken-key"
+    #: A redirect to a host that is not the creator, which a client must
+    #: not follow.
+    REDIRECT = "redirect"
 
 
 class _Server(ThreadingHTTPServer):
@@ -73,6 +76,12 @@ class _Handler(BaseHTTPRequestHandler):
         values = urllib.parse.parse_qs(query, keep_blank_values=True)
         date = values.get("date", [None])[0]
         end_point.record(date)
+        if end_point.answer is Answer.REDIRECT:
+            self.send_response(302)
+            self.send_header("Location", "http://elsewhere.invalid/key.pem")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         try:
             body = end_point.body(date)
         except ValueError:
@@ -137,6 +146,11 @@ class KeyEndPoint:
     def record(self, date: Optional[str]) -> None:
         with self._lock:
             self._dates.append(date)
+
+    @property
+    def answer(self) -> Answer:
+        """What this end point serves."""
+        return self._answer
 
     def body(self, date: Optional[str]) -> Optional[str]:
         """The body to serve, or None where the end point has no key. Raises

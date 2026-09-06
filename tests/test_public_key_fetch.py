@@ -219,6 +219,28 @@ class PublicKeyFetchTests(unittest.TestCase):
             "a connection that is refused leaves the signature unjudged",
         )
 
+    def test_a_redirect_is_not_followed(self) -> None:
+        """A creator whose domain answers with a redirect does not get the
+        key at the other end trusted as its own. The answer is that the key
+        is unavailable, carrying the 302, and the request that would have
+        gone to the other host is never made. Without this a network
+        attacker who could bend a creator's DNS or a misconfigured creator
+        could substitute the key, and forgeries would verify."""
+        owid = key_fixtures.identifier()
+        end_point = self.end_point(Answer.REDIRECT)
+        with self.assertRaises(PublicKeyFetchError) as refused:
+            public_key_fetch._public_key_pem_at_url(
+                end_point.url_for(owid), owid.domain
+            )
+        self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
+        self.assertEqual(302, refused.exception.status_code)
+        self.assertIs(
+            SignatureStatus.KEY_UNAVAILABLE,
+            public_key_fetch._signature_status_at_url(
+                owid, end_point.url_for(owid), ALONE
+            ),
+        )
+
     def test_a_key_that_cannot_be_read_is_invalid_key(self) -> None:
         """Text shaped like a PEM that holds no key is a fault in the key, and
         never a signature that does not match."""
