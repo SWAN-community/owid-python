@@ -186,7 +186,7 @@ class DomainLengthTests(unittest.TestCase):
 
         self.assertEqual(parsed.domain, MAXIMUM_DOMAIN)
         self.assertEqual(parsed, original)
-        self.assertTrue(parsed.verify_with_crypto(crypto, []))
+        self.assertTrue(parsed.verify_with_crypto(crypto))
 
 
 class CountingCrypto:

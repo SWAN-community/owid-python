@@ -53,7 +53,7 @@ BAD_VECTOR = (
 UTF8_PAYLOAD = "Zürich ❤ OWID £€"
 
 # Cross language signed fixtures. Each entry holds the SPKI public key and the
-# four signed OWIDs to verify.
+# two signed OWIDs to verify.
 
 GO = {
     "domain": "go.swan-demo.uk",
@@ -71,14 +71,6 @@ GO = {
         "A2dvLnN3YW4tZGVtby51awA/vTMAFgAAAFrDvHJpY2gg4p2kIE9XSUQgwqPigqzxY+4Q"
         "gUGt84xC9HxHmHXDt+wcB0Y9a6E+Txm2F147Qacbp0CtrF8x7QCWZfkcKCKNGSM8hYZE"
         "fYjJtViG+tA+"
-    ),
-    "chain_party": (
-        "A2dvLnN3YW4tZGVtby51awA/vTMABQAAAHBhcnR5l7NyNmFw2lxqc4DKJWoq0UVd5ujG"
-        "V/+fvVxqYTRlwCFxaSuwvnhLQQHjX5spxWb4O08IeuiuGCat1WFB/Wqlyw=="
-    ),
-    "chain_root": (
-        "A2dvLnN3YW4tZGVtby51awA/vTMABAAAAHJvb3R/bEqzG8gAy9yTF1UMEtOlYXBBmn3a"
-        "20jxXq5NmxIC8iuZvduOXKMf+K8VoAapkWwfpoDKQHS09IhljasZqC0k"
     ),
 }
 
@@ -99,14 +91,6 @@ DOTNET = {
         "VuaeaDUej0sF+cHfYj/icDBmlBLOviC6ZE28am8EtY+IGuesFcg2rKMybcsAxMmnrDtF"
         "2xsk1cJvHgoIYpSJJQ=="
     ),
-    "chain_party": (
-        "A2RvdG5ldC5zd2FuLWRlbW8udWsAPb0zAAUAAABwYXJ0eXtD6H4R7GbvRyFU+bCKgjMA"
-        "ZFFm8KHln80XPwQOBb/Ub9EZfE4Ml3ueRkKX51+MD98RFgTSmjbqrAnzFkLlilA="
-    ),
-    "chain_root": (
-        "A2RvdG5ldC5zd2FuLWRlbW8udWsAPb0zAAQAAAByb290fErj2LccPYCduWUW8vY2aBjr"
-        "ecDfnTpVpv3+SESJMFW5pcuPKEQik2rC0fWEoB5Vr6e0k5inrhUGiF2c2Y2YDw=="
-    ),
 }
 
 RUST = {
@@ -125,14 +109,6 @@ RUST = {
         "A3J1c3Quc3dhbi1kZW1vLnVrAD69MwAWAAAAWsO8cmljaCDinaQgT1dJRCDCo+KCrDHe"
         "nDds+W587AzXpBb94gmLOloeBJTlHnjCkez4Dz2yAPtjcoQ6M/ZUWDIobtJHE5n9a81p"
         "Tsn/Kvi74Azzx4s="
-    ),
-    "chain_party": (
-        "A3J1c3Quc3dhbi1kZW1vLnVrAD69MwAFAAAAcGFydHmJ7qaxWgIZUHmGOQb2xC+RuZNw"
-        "rkMmo1SA9/MfI4SoEpRYdnteXAKUQXxTOK3lmQ3Qz3UwBB6gBb3Q8hi1Wx0R"
-    ),
-    "chain_root": (
-        "A3J1c3Quc3dhbi1kZW1vLnVrAD69MwAEAAAAcm9vdFd0+QLaBLGPyBrQO+VNunBIQZzw"
-        "8/lhEiDOKTx36Dc93A0n0fzPDMt/C+BdWMqhnL4nVvyurb3IHR7DUAmgmO0="
     ),
 }
 

@@ -23,7 +23,7 @@ crypto instance holding the signing key to produce the signature.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional, Sequence
+from typing import Optional
 
 from .crypto import Crypto
 from .error import OwidError
@@ -108,14 +108,8 @@ class Creator:
     def _sign(self, owid: Owid) -> None:
         """Signs the OWID provided, setting the domain to the creator domain,
         the date to the current time, and the version to the current version,
-        then signing it."""
-        self._sign_with_others(owid, [])
-
-    def _sign_with_others(self, owid: Owid, others: Sequence[Owid]) -> None:
-        """Signs the OWID provided together with the other OWIDs provided.
-
-        The same others, in the same order, must be passed when verifying.
-        """
+        then signing it. The signature covers the OWID's own bytes without
+        the signature field and nothing else."""
         owid._version = DEFAULT_VERSION
         owid._domain = self._domain
         # Truncate to whole minutes so the in-memory date matches the value
@@ -123,8 +117,7 @@ class Creator:
         # decoded from its bytes, and ensures signing and verification operate
         # on the same minute precise value.
         owid._date = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        data = owid.data_for_crypto(others)
-        owid._signature = self._crypto.sign_byte_array(data)
+        owid._signature = self._crypto.sign_byte_array(owid.signed_bytes())
         if len(owid._signature) != SIGNATURE_LENGTH:
             raise OwidError(
                 "signature length '{0}' not compatible with '{1}' OWID "
@@ -137,7 +130,7 @@ class Creator:
             raise OwidError("a payload is required")
         return self.create(value.encode("utf-8"))
 
-    def create(self, value: bytes, others: Sequence[Owid] = ()) -> Owid:
+    def create(self, value: bytes) -> Owid:
         """Creates and signs a new OWID carrying the bytes as its payload.
 
         This is one of only two ways an OWID reaches calling code, the other
@@ -145,13 +138,9 @@ class Creator:
         the date and the signature; a caller supplies the payload and nothing
         else, so there is no moment at which a partly built OWID exists for
         anyone to hold or pass on.
-
-        Any others are covered by the signature so that a tree can be verified
-        as a whole, and the same others in the same order must be passed when
-        verifying.
         """
         if value is None:
             raise OwidError("a payload is required")
         owid = Owid._create(payload=bytes(value))
-        self._sign_with_others(owid, list(others))
+        self._sign(owid)
         return owid

@@ -9,9 +9,8 @@ Python.
 
 An Open Web Id (OWID) records that the entity operating a domain captured or
 generated a payload at a date and time, together with an ECDSA signature over
-the OWID and any other OWIDs it was signed with. OWIDs chain together to form
-verifiable trees. The curve is NIST P-256 (also known as secp256r1 or
-prime256v1) and the hash is SHA-256.
+the OWID. The curve is NIST P-256 (also known as secp256r1 or prime256v1) and
+the hash is SHA-256.
 
 Read the [OWID project](https://github.com/SWAN-community/owid) to learn more
 about the concepts before looking into this implementation. This package
@@ -24,9 +23,10 @@ format, the ECDSA signing and verification, a creator that binds a domain to a
 signing key, framework agnostic helpers for the well known end points, and
 the fetch of another creator's public key from its well known end point. The
 core has no network access of its own. The one module that reaches the
-network is `owid.public_key_fetch`, which uses the standard library `urllib`,
-is imported only by a caller that asks for it, and takes a transport of the
-caller's own where `urllib` is not the right client.
+network is `owid.public_key_fetch`, whose functions are coroutines a caller
+awaits. It is imported only by a caller that asks for it, runs the standard
+library `urllib` on a worker thread unless the caller supplies a transport of
+its own, and adds no dependency.
 
 Version 3 is the current version produced for new OWIDs. Versions 1 and 2 are
 deprecated and are supported for reading existing data only.
@@ -119,22 +119,11 @@ encoded = owid.as_base64()
 result = Owid.parse(encoded)
 if result:
     public_pem = crypto.public_key_pem()
-    assert result.owid.verify_with_public_key(public_pem, [])
+    assert result.owid.verify_with_public_key(public_pem)
 else:
     # result.status names which of the expected problems it was, for example
     # ParseStatus.INVALID_BASE64 or ParseStatus.BYTE_COUNT_MISMATCH.
     reason = result.status.value
-```
-
-OWIDs chain together. Create one that covers others, and pass the same others,
-in the same order, when verifying.
-
-```python
-root = creator.create_string("root")
-party = creator.create(b"party", [root])
-
-assert party.verify_with_crypto(crypto, [root])
-assert not party.verify_with_crypto(crypto, [])
 ```
 
 Where the difference between a signature that does not match and a check that
@@ -165,17 +154,48 @@ anything older than a few days means asking for the key that was in force on
 the date the identifier carries.
 
 `owid.public_key_fetch` asks the creator for that key. The request is
-`/owid/api/v{n}/public-key?date={minutes}&format=pkcs`, where the version in
-the path is the version byte of the identifier being checked and the minutes
-are counted from 2020-01-01 in the same way the identifier stores its date. A
+`/owid/api/v{n}/public-key?date={minutes}&format=spki`, where the version in
+the path is the version byte of the identifier being checked, the minutes are
+counted from 2020-01-01 in the same way the identifier stores its date, and
+the format names the one encoding of the key this package reads. A
 creator that ignores the parameter returns its current key, so every
 identifier it signed under an earlier key reads as not matching, which is why
-a creator that rotates its key has to honour the date. Keys already fetched
-are held against the URL they came from, which names the domain, the version
-and the minute, up to 1024 of them before the store is emptied, and
-`clear_cache()` empties it on demand. Each request waits at most ten seconds.
+a creator that rotates its key has to honour the date.
+
+Keys already fetched are held by creator. The request names the minute the
+identifier was created, so a creator that rotates its key answers with the key
+in force then, and the answer is the JSON form, which carries the moments the
+key is valid from and to as well as the key. A creator built on this package
+states both, so the whole span is held from one answer and an identifier dated
+anywhere in it is verified without a request whatever the clock drift. An
+answer that states the start alone is held from the start up to fifteen minutes
+behind now, because no later key can have started before then. An answer that
+states no span comes from a creator with one key and no schedule, and is held
+against the minute asked about and every minute between two such answers for
+the same key, but never for a minute within fifteen minutes of now, because a
+creator whose clock differs from this one's may have read that minute as its
+present rather than as the minute named. The PEM alone as text is not a valid
+answer and is reported as a key that cannot be read. A signature that does not
+verify under the key selected, where the identifier is dated within fifteen
+minutes of an edge of the span the creator stated for that key, is checked
+against the key for the minute just beyond that edge before it is reported as
+not matching, because a creator's signing machines may not agree with its
+schedule to the minute. Where the creator's own statement puts the identifier's
+date outside the span of the key it answered with and nothing verifies, the key
+is reported as unavailable rather than the signature as not matching, because a
+key that was not in force proves nothing about the identifier. Live identifiers
+from a creator that states its spans cost one request per key, and older ones
+cost none. At most 1024 keys are held across every creator before the store is
+emptied and filled again, and `clear_cache()` empties it on demand, which is
+how a long running process drops a key it has learned it should no longer
+trust. Two callers who await the same key at the same moment share one request
+rather than making two. Each request waits at most ten seconds. Every function
+that reaches the network is a coroutine, so a caller awaits it, and there is no
+synchronous form.
 
 ```python
+import asyncio
+
 from owid import SignatureStatus, public_key_fetch
 
 # A creator whose key this example never actually asks for. The transport
@@ -185,11 +205,11 @@ from owid import SignatureStatus, public_key_fetch
 remote_creator = Creator("creator.invalid", Crypto.new())
 remote = remote_creator.create_string("from another creator")
 
-def unreachable(url, timeout):
+async def unreachable(url, timeout):
     raise OSError("this example makes no request")
 
-fetched = public_key_fetch.signature_status(
-    remote, "https", transport=unreachable
+fetched = asyncio.run(
+    public_key_fetch.signature_status(remote, "https", transport=unreachable)
 )
 if fetched is SignatureStatus.KEY_UNAVAILABLE:
     # The key could not be obtained, so the signature was never examined.
@@ -199,9 +219,16 @@ assert fetched is SignatureStatus.KEY_UNAVAILABLE
 ```
 
 A caller whose environment needs its own HTTP client passes a transport as
-the last argument, being a callable that takes the URL and the timeout in
-seconds, returns the response code and the body as bytes, and raises
-`OSError` where no response could be obtained at all.
+the last argument, being an `async` callable that takes the URL and the
+timeout in seconds, returns the response code and the body as bytes, and
+raises `OSError` where no response could be obtained at all. The default
+transport runs `urllib` on a worker thread through `asyncio.to_thread`, which
+is blocking I/O on a worker thread rather than a non-blocking request, so the
+event loop is free during the request but a thread is not. Supply an
+`aiohttp` or `httpx` based transport for a fully non-blocking one. The
+default transport never follows a redirect, so a creator whose domain answers
+with a 3xx reads as a key that is unavailable rather than as a key served by
+whatever host the redirect named.
 
 Where the whole published schedule is already held, `PublicKeySchedule`
 chooses the key without any request. The rule is the one the cloud itself
@@ -379,10 +406,9 @@ a separate answer.
 - `payload_as_string()` decodes the payload as UTF-8, replacing invalid bytes.
 - `payload_as_printable()` returns the payload as lower case hexadecimal.
 - `payload_as_base64()` returns the payload as a base 64 string.
-- `verify_with_crypto(crypto, others)` and
-  `verify_with_public_key(public_pem, others)` return True if the signature is
-  valid. Pass an empty list for `others` when the OWID was signed on its own.
-- `signature_status(public_pem, others)` answers the same question with a
+- `verify_with_crypto(crypto)` and `verify_with_public_key(public_pem)` return
+  True if the signature is valid.
+- `signature_status(public_pem)` answers the same question with a
   `SignatureStatus`, which keeps a signature that does not match apart from a
   check that could not be made at all.
 - `age_minutes()` returns the whole minutes elapsed since creation.
@@ -417,35 +443,43 @@ opaque crypto error.
 - `Creator(domain, crypto)` binds a domain to a signing crypto instance.
 - `from_configuration(configuration)` builds a creator from a domain and a
   private key PEM.
-- `create(value, others)` creates and signs a new OWID carrying the bytes,
-  covering any others with the same signature.
+- `create(value)` creates and signs a new OWID carrying the bytes.
 - `create_string(value)` does the same with the UTF-8 bytes of a string.
 
 `endpoints`
 
-- `creator_path(version)` and `public_key_path(version)` return the well known
-  paths.
-- `creator_response(creator, name, contract_url)` returns the creator JSON
-  with the `domain`, `name`, `publicKeySPKI`, and `contractURL` fields.
-- `public_key_response(creator, format)` returns the public key PEM. The
-  format must be `spki` or `pkcs`.
+- `public_key_path(version)` returns the well known path of the public key end
+  point.
+- `public_key_response(creator, format)` returns the JSON body of the public
+  key end point for a creator with one key, the key as `publicKey`, the
+  encoding it is in as `format`, and `validFrom` and `validTo` null.
+  `public_key_response_at` states both moments from the schedule, and
+  `public_key_answer` builds and checks any answer, so a key that cannot be
+  read or a schedule that contradicts itself is refused before it is sent.
+  The PEM alone as text is not a valid answer. The one format defined is
+  `spki`, a Subject Public Key Info PEM. It is what a request without a
+  `format` receives, and any other value is refused rather than answered in
+  an encoding the caller did not ask for.
 - `public_key_response_at(schedule, format, date, now=None)` returns the
   status code and body for a creator that rotates its key, choosing from a
-  `PublicKeySchedule` the way the specification requires.
+  `PublicKeySchedule` the way the specification requires, and answers 400 to
+  a `format` other than `spki`.
 
 `public_key_fetch`
 
 - `public_key_url(owid, scheme)` builds the request, naming the version of the
   OWID and the minute the OWID was signed.
-- `public_key_pem(owid, scheme, transport=None)` returns the key, raising
-  `PublicKeyFetchError`, which carries the status to report, the domain and
-  the response code.
-- `signature_status(owid, scheme, others=None, transport=None)` answers with
-  the status, so a key that could not be fetched is `KEY_UNAVAILABLE`, one
-  that could not be read is `INVALID_KEY`, and neither is mistaken for a
-  signature that does not match. `verify` takes the same arguments and
-  answers True only for `SIGNATURE_VALID`.
-- `clear_cache()` empties the keys already fetched.
+- `await public_key_pem(owid, scheme, transport=None)` returns the key,
+  raising `PublicKeyFetchError`, which carries the status to report, the
+  domain and the response code.
+- `await signature_status(owid, scheme, transport=None)` answers
+  with the status, so a key that could not be fetched is `KEY_UNAVAILABLE`,
+  as is one the creator says was not in force at the identifier's date, one
+  that could not be read is `INVALID_KEY`, and none of these is mistaken for
+  a signature that does not match. `verify` takes the same arguments, is
+  awaited in the same way, and answers True only for `SIGNATURE_VALID`.
+- `clear_cache()` empties the keys already fetched and forgets the requests
+  still in flight. It makes no request and is not awaited.
 
 `PublicKeySchedule` and `DatedPublicKey`
 
@@ -455,7 +489,7 @@ opaque crypto error.
   schedule does not reach back that far.
 - `current()` returns the key in force now, and `last()` the key with the
   latest start, which for a schedule published ahead of time is usually a
-  key that has not begun. `signature_status(owid, others=None)` chooses the
+  key that has not begun. `signature_status(owid)` chooses the
   key and answers with the status, and `verify` answers True only for
   `SIGNATURE_VALID`.
 - `DatedPublicKey(starts_at, public_key_pem)` is one key and the date the key
@@ -482,9 +516,7 @@ minutes. The base date is 2020-01-01T00:00:00 UTC.
 The signature is the 64 byte concatenation of the 32 byte big endian r value
 and the 32 byte big endian s value (IEEE P1363 format), not the ASN.1 DER form
 that most libraries produce by default. The data covered by the signature is
-this OWID without its signature, followed by the complete bytes, including the
-signature, of each other OWID in the order given. The same others in the same
-order must be supplied to verify as were supplied to sign.
+this OWID without its signature field and nothing else.
 
 A single byte with value 0 is the marker for an absent optional OWID inside a
 larger byte array, written by `Owid.empty_to_buffer` and reported by both reads

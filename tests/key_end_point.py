@@ -31,6 +31,7 @@ than only what the URL builder returned.
 
 from __future__ import annotations
 
+import json
 import threading
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional
 
-from owid import Owid, io
+from owid import Owid, endpoints, io
 from owid.public_key_fetch import public_key_url
 
 from tests import key_fixtures
@@ -57,6 +58,11 @@ class Answer(Enum):
     #: The published schedule, chosen by the date requested.
     SCHEDULE = "schedule"
     #: Text shaped like a PEM that no key can be read out of.
+    #: The published schedule as JSON with the key alone and no moments, as a
+    #: creator with one key and no schedule answers.
+    SPANLESS = "spanless"
+    #: The key alone as text, which the specification does not allow.
+    PEM_ONLY = "pem-only"
     BROKEN_KEY = "broken-key"
     #: A redirect to a host that is not the creator, which a client must
     #: not follow.
@@ -75,6 +81,7 @@ class _Handler(BaseHTTPRequestHandler):
         query = urllib.parse.urlsplit(self.path).query
         values = urllib.parse.parse_qs(query, keep_blank_values=True)
         date = values.get("date", [None])[0]
+        format = values.get("format", [None])[0]
         end_point.record(date)
         if end_point.answer is Answer.REDIRECT:
             self.send_response(302)
@@ -83,10 +90,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            body = end_point.body(date)
+            body = end_point.body(date, format)
         except ValueError:
-            # A date that is not a number is refused, as the cloud refuses
-            # it, rather than failing inside the handler.
+            # A date that is not a number, or a format the end point does not
+            # serve, is refused as the cloud refuses it, rather than failing
+            # inside the handler.
             self.send_response(400)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -98,7 +106,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         data = body.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header(
+            "Content-Type",
+            "text/plain" if end_point.answer is Answer.PEM_ONLY else "application/json",
+        )
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -152,17 +163,25 @@ class KeyEndPoint:
         """What this end point serves."""
         return self._answer
 
-    def body(self, date: Optional[str]) -> Optional[str]:
+    def body(self, date: Optional[str], format: Optional[str]) -> Optional[str]:
         """The body to serve, or None where the end point has no key. Raises
-        ValueError where the date is not a count of minutes."""
+        ValueError where the date is not a count of minutes or the format is
+        not one the end point serves."""
         if self._answer is Answer.BROKEN_KEY:
-            # Shaped like a PEM, with a body no key can be read out of. This
-            # is the 30 August 2026 fault, where the end points served PEM a
-            # strict parser refused and good identifiers went unverified.
-            return (
-                "-----BEGIN PUBLIC KEY-----\n"
-                "bm90IGEga2V5\n"
-                "-----END PUBLIC KEY-----\n"
+            # Shaped like a PEM, with a body no key can be read out of. It is
+            # sent as the JSON form without the check a creator applies,
+            # because that check is what catches it.
+            return json.dumps(
+                {
+                    "format": endpoints.SPKI_FORMAT,
+                    "publicKey": (
+                        "-----BEGIN PUBLIC KEY-----\n"
+                        "bm90IGEga2V5\n"
+                        "-----END PUBLIC KEY-----\n"
+                    ),
+                    "validFrom": None,
+                    "validTo": None,
+                }
             )
         asked = REQUEST_MOMENT
         if date is not None:
@@ -174,4 +193,16 @@ class KeyEndPoint:
         key = self._schedule.key_in_force(asked)
         if key is None:
             return None
-        return key.public_key_pem
+        if self._answer is Answer.PEM_ONLY:
+            return key.public_key_pem
+        if self._answer is Answer.SPANLESS:
+            return endpoints.public_key_answer(key.public_key_pem, None, None, None)
+        # The answer the package's own server side helper builds, so the
+        # client is tested against what a creator built on it sends.
+        status, body = endpoints.public_key_response_at(
+            self._schedule, format, date, REQUEST_MOMENT
+        )
+        if status == 400:
+            raise ValueError("the format is not one the end point serves")
+        assert status == 200, status
+        return body

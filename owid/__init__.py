@@ -22,7 +22,7 @@ about the concepts before looking into this implementation. This package
 creates, signs, serializes, and verifies OWIDs.
 
 An OWID is a compact binary structure signed with an ECDSA NIST P-256 key and
-a SHA-256 digest. OWIDs chain together to form verifiable trees.
+a SHA-256 digest.
 """
 
 from __future__ import annotations

@@ -30,43 +30,29 @@ def _new_creator() -> Creator:
 class EndpointTests(unittest.TestCase):
     def test_paths(self) -> None:
         self.assertEqual(
-            endpoints.creator_path(Version.VERSION3), "/owid/api/v3/creator"
-        )
-        self.assertEqual(
             endpoints.public_key_path(Version.VERSION3),
             "/owid/api/v3/public-key",
         )
 
-    def test_creator_response_fields(self) -> None:
-        creator = _new_creator()
-        body = endpoints.creator_response(
-            creator, "Example Org", "https://example.com/contract"
-        )
-        parsed = json.loads(body)
-        self.assertEqual(parsed["domain"], "example.com")
-        self.assertEqual(parsed["name"], "Example Org")
-        self.assertEqual(parsed["contractURL"], "https://example.com/contract")
-        self.assertIn("BEGIN PUBLIC KEY", parsed["publicKeySPKI"])
-        # The JSON field names must match the specification.
-        self.assertIn("publicKeySPKI", body)
-        self.assertIn("contractURL", body)
-
-    def test_creator_response_default_contract_url(self) -> None:
-        creator = _new_creator()
-        body = endpoints.creator_response(creator, "Example Org")
-        parsed = json.loads(body)
-        self.assertEqual(parsed["contractURL"], "")
-
     def test_public_key_response_formats(self) -> None:
+        """The one format defined is answered whether it is asked for by name
+        or the request has no format, and the answer names it."""
         creator = _new_creator()
-        for fmt in ("spki", "pkcs"):
+        for fmt in ("spki", None):
             body = endpoints.public_key_response(creator, fmt)
-            self.assertIn("BEGIN PUBLIC KEY", body)
+            answer = json.loads(body)
+            self.assertEqual("spki", answer["format"], "the answer names the encoding of the key")
+            self.assertIn("BEGIN PUBLIC KEY", answer["publicKey"])
+            self.assertIsNone(answer["validFrom"], "a single key has no schedule")
+            self.assertIsNone(answer["validTo"])
 
     def test_public_key_response_invalid_format(self) -> None:
+        """Any other format is refused rather than answered in an encoding
+        the caller did not ask for."""
         creator = _new_creator()
-        with self.assertRaises(OwidError):
-            endpoints.public_key_response(creator, "other")
+        for fmt in ("pkcs", "other"):
+            with self.assertRaises(OwidError):
+                endpoints.public_key_response(creator, fmt)
 
 
 if __name__ == "__main__":

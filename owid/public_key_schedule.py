@@ -26,9 +26,7 @@ The rule is the one the cloud itself applies, being the latest key whose
 start is at or before the date asked about. Keys are generated in batches,
 often many weeks ahead of the weeks the keys cover, so the moment key
 material was generated says nothing about which key signed anything and is
-not held here at all. Selecting on a generation moment picks a key that has
-not started yet and reports a genuine identifier as not matching, which is
-what the .NET port did before that port was fixed.
+not held here at all. Selecting on a generation moment picks a key that has not started yet and reports a genuine identifier as not matching.
 
 A date the schedule does not reach, being one earlier than the first start,
 has no key. That answer is reported as SignatureStatus.KEY_UNAVAILABLE rather
@@ -39,7 +37,7 @@ was never examined.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Tuple
 
 from .error import OwidError
 from .owid import Owid
@@ -148,6 +146,15 @@ class PublicKeySchedule:
             index -= 1
         return None
 
+    def next_start_after(self, key: DatedPublicKey) -> Optional[datetime]:
+        """Returns the earliest start in the schedule after the key's own,
+        being the moment the key stops being in force, or None where the key
+        is the last in the schedule and is in force until further notice."""
+        following = [
+            other.starts_at for other in self._keys if other.starts_at > key.starts_at
+        ]
+        return min(following) if following else None
+
     def last(self) -> Optional[DatedPublicKey]:
         """Returns the key with the latest start, or None where the schedule
         holds no keys.
@@ -155,10 +162,7 @@ class PublicKeySchedule:
         This is not the key in force now. A creator publishes its schedule
         ahead of time, so the last key by start is usually one whose period
         has not begun and which has signed nothing yet. The key in force now
-        is current(). Serving the last key where the current one was meant is
-        the same fault as selecting by the generation moment, being a key
-        from a period that has not started, and it is the fault the .NET port
-        carried in its answer to a request that named no date.
+        is current(). Serving the last key where the current one was meant is the same fault as selecting by the generation moment, being a key from a period that has not started.
         """
         if not self._keys:
             return None
@@ -178,9 +182,7 @@ class PublicKeySchedule:
             return None
         return self.key_in_force(owid.date)
 
-    def signature_status(
-        self, owid: Optional[Owid], others: Optional[Sequence[Owid]] = None
-    ) -> SignatureStatus:
+    def signature_status(self, owid: Optional[Owid]) -> SignatureStatus:
         """Says whether the signature on the OWID is genuine, using the key
         that was in force when the OWID was signed. The answer is
         SignatureStatus.KEY_UNAVAILABLE where the schedule holds no key for
@@ -190,12 +192,10 @@ class PublicKeySchedule:
         key = self.key_for(owid)
         if key is None:
             return SignatureStatus.KEY_UNAVAILABLE
-        return owid.signature_status(key.public_key_pem, others)
+        return owid.signature_status(key.public_key_pem)
 
-    def verify(
-        self, owid: Optional[Owid], others: Optional[Sequence[Owid]] = None
-    ) -> bool:
+    def verify(self, owid: Optional[Owid]) -> bool:
         """Returns True only when the signature verifies under the key in
         force when the OWID was signed."""
-        status = self.signature_status(owid, others)
+        status = self.signature_status(owid)
         return status is SignatureStatus.SIGNATURE_VALID
