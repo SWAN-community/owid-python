@@ -43,9 +43,14 @@ the key is held by creator for that whole span, so an identifier dated inside
 it is verified without a request whichever minute it carries. A creator that
 states no span has its key held against the minutes it confirms. A signature
 that fails under the key selected, where the identifier is dated within the
-clock drift allowance of the edge of that key's span, is checked against the
-neighbouring key before it is reported as not matching. Two callers who await
-the same key at the same moment share one request rather than making two.
+clock drift allowance of an edge of the span the creator stated for that key,
+is checked against the key for the minute just beyond that edge before it is
+reported as not matching. Where the creator's own statement puts the
+identifier's date outside the span of the key it answered with and nothing
+verifies, the key is reported as unavailable rather than the signature as not
+matching, because a key that was not in force proves nothing about the
+identifier. Two callers who await the same key at the same moment share one
+request rather than making two.
 
 The Java port answers the same question with PublicKeyFetch, the Rust port
 with Owid::verify_status and the Go port with SignatureStatusFromDomain.
@@ -81,15 +86,20 @@ MAXIMUM_CACHED_KEYS = 1024
 #: How far a creator's clock may run ahead of or behind this one's, in
 #: minutes.
 #:
-#: It is used in two places. A creator that does not state the span of the key
-#: it answers with reads a date later than its own now as now, so within this
-#: window of now this process cannot tell whether the creator read the minute
-#: as its past or as its present, and nothing learned from such an answer is
-#: held or served. And a creator's signing machines may not agree with the
-#: creator's own schedule to the minute, so an identifier dated within this
-#: window of a key's edge that does not verify under that key is checked
-#: against the neighbouring key before it is reported as not matching.
+#: It is used in two places. A creator that does not state the end of the span
+#: of the key it answers with reads a date later than its own now as now, so
+#: within this window of now this process cannot tell whether the creator read
+#: the minute as its past or as its present, and nothing learned from such an
+#: answer is held or served. And a creator's signing machines may not agree
+#: with the creator's own schedule to the minute, so an identifier dated within
+#: this window of an edge of the span the creator stated for a key that does
+#: not verify under that key is checked against the key for the minute just
+#: beyond that edge before it is reported as not matching.
 CLOCK_DRIFT_ALLOWANCE_MINUTES = 15
+
+#: The last minute the date field of an OWID can hold, which is where a span
+#: stated with a start and no end runs to.
+_LAST_MINUTE = 0xFFFFFFFF
 
 #: The most bytes accepted from a response. A public key PEM is a few hundred
 #: bytes, so a body beyond this is not a key and is not held or decoded.
@@ -121,9 +131,11 @@ class _HeldKey:
     grows as the creator confirms the same key for more minutes.
     """
 
-    __slots__ = ("pem", "first", "last", "explicit")
+    __slots__ = ("pem", "first", "last", "explicit", "open_ended")
 
-    def __init__(self, pem: str, first: int, last: int, explicit: bool) -> None:
+    def __init__(
+        self, pem: str, first: int, last: int, explicit: bool, open_ended: bool
+    ) -> None:
         #: The key in PEM form, as the creator served it.
         self.pem = pem
         #: The earliest minute the key is known to cover.
@@ -132,6 +144,10 @@ class _HeldKey:
         self.last = last
         #: Whether the creator stated the whole span itself.
         self.explicit = explicit
+        #: Whether the creator stated the start of the span and no end, so
+        #: that as far as the creator has said the key is in force until
+        #: further notice, whatever this cache holds it for.
+        self.open_ended = open_ended
 
     def covers(self, minute: int) -> bool:
         """Whether the minute lies within the known span."""
@@ -139,22 +155,28 @@ class _HeldKey:
 
 
 class _KeyAnswer:
-    """What the cache or a fetch answers with. The key, and where it is known,
-    the span of minutes the key covers, so that a caller can tell whether the
-    identifier it is checking sits near the edge of the span."""
+    """What the cache or a fetch answers with. The key, and where the creator
+    stated one, the span of minutes the creator says the key covers, so that
+    a caller can tell whether the identifier it is checking sits near an edge
+    of the span, or outside it altogether. A span stated with a start and no
+    end runs to the last minute there is."""
 
     __slots__ = ("pem", "first", "last", "known")
 
     def __init__(
         self, pem: str, first: int = 0, last: int = 0, known: bool = False
     ) -> None:
+        #: The key in PEM form.
         self.pem = pem
+        #: The first minute the creator says the key covers.
         self.first = first
+        #: The last minute the creator says the key covers.
         self.last = last
+        #: Whether the creator stated a span at all.
         self.known = known
 
     def covers(self, minute: int) -> bool:
-        """Whether the minute lies within the known span."""
+        """Whether the minute lies within the stated span."""
         return self.known and self.first <= minute <= self.last
 
 
@@ -303,7 +325,15 @@ async def _signature_status_at_url(
 ) -> SignatureStatus:
     """The work signature_status does once the URL is known, kept apart so
     that the tests drive the real fetch against a key end point the tests can
-    stand up locally rather than against a near copy of the fetch."""
+    stand up locally rather than against a near copy of the fetch.
+
+    The signature is checked under the key the end point serves for the
+    OWID's own date, and under the neighbouring key where the date is within
+    the clock drift allowance of an edge of the span the creator stated. A
+    key the creator says was not in force at the OWID's date proves nothing
+    about the identifier, so where nothing verifies under such a key the
+    answer is that the key is unavailable and not that the signature does not
+    match."""
     try:
         answer = await _key_at_url(url, owid.domain, transport)
     except PublicKeyFetchError as failed:
@@ -311,15 +341,21 @@ async def _signature_status_at_url(
     except OwidError:
         return SignatureStatus.KEY_UNAVAILABLE
     status = owid.signature_status(answer.pem, others)
-    if status is SignatureStatus.SIGNATURE_INVALID and await _neighbour_verifies(
-        owid, url, answer, others, transport
-    ):
+    if status is not SignatureStatus.SIGNATURE_INVALID:
+        return status
+    minute = io.minutes_since_base(owid.date)
+    if minute < 0:
+        return status
+    if await _neighbour_verifies(owid, minute, url, answer, others, transport):
         return SignatureStatus.SIGNATURE_VALID
+    if answer.known and not answer.covers(minute):
+        return SignatureStatus.KEY_UNAVAILABLE
     return status
 
 
 async def _neighbour_verifies(
     owid: Owid,
+    minute: int,
     url: str,
     tried: _KeyAnswer,
     others: Optional[Sequence[Owid]],
@@ -333,25 +369,21 @@ async def _neighbour_verifies(
     signed with the key before it, and one dated just before may have been
     signed with the key after. Where the signature does not verify under the
     key selected and the OWID's minute is within the clock drift allowance of
-    the edge of the span that key is known to cover, the key for the minute
-    just beyond that edge is asked for and tried. A key already known to cover
-    the neighbouring minute is not asked for again, and a neighbour that turns
-    out to be the same key is not tried again. This costs at most two more
-    requests, and only for a signature that has already failed.
+    an edge of the span the creator stated for that key, the key for the
+    minute just beyond that edge is asked for and tried. A key already held
+    for that minute is not asked for again, and a neighbour that turns out to
+    be the same key is not tried again. A creator that stated no span has one
+    key and no schedule, so there is no neighbour to try. This costs at most
+    two more requests, and only for a signature that has already failed.
     """
-    minute = io.minutes_since_base(owid.date)
-    if minute < 0:
+    if not tried.known:
         return False
-    if tried.known and not tried.covers(minute):
-        # The key tried was never in force at the identifier's minute, so
-        # the identifier is not near an edge of that key's span. This is an
-        # undated request answered with the current key, or a creator whose
-        # answer did not cover the minute asked about, and the neighbours of
-        # the minute have nothing to do with the key tried.
-        return False
-    for at in (minute - CLOCK_DRIFT_ALLOWANCE_MINUTES, minute + CLOCK_DRIFT_ALLOWANCE_MINUTES):
-        if at < 0 or at > 0xFFFFFFFF or tried.covers(at):
-            continue
+    beyond: List[int] = []
+    if tried.first > 0 and _near_edge(minute, tried.first):
+        beyond.append(tried.first - 1)
+    if tried.last < _LAST_MINUTE and _near_edge(minute, tried.last):
+        beyond.append(tried.last + 1)
+    for at in beyond:
         try:
             neighbour = await _key_at_url(
                 "{0}?date={1}&format=pkcs".format(_end_point_of(url), at),
@@ -367,6 +399,13 @@ async def _neighbour_verifies(
         if owid.signature_status(neighbour.pem, others) is SignatureStatus.SIGNATURE_VALID:
             return True
     return False
+
+
+def _near_edge(minute: int, edge: int) -> bool:
+    """Whether the minute is no further from the edge minute than the clocks
+    of a creator's signing machines are allowed to differ from its
+    schedule."""
+    return abs(minute - edge) <= CLOCK_DRIFT_ALLOWANCE_MINUTES
 
 
 async def _public_key_pem_at_url(
@@ -509,8 +548,29 @@ def _held_for(end_point: str, url: str) -> Optional[_KeyAnswer]:
         return None
     for key in _cache.get(end_point, ()):
         if key.covers(minute) and (key.explicit or not recent):
-            return _KeyAnswer(key.pem, key.first, key.last, True)
+            return _stated_for(key)
     return None
+
+
+def _stated_for(key: _HeldKey) -> _KeyAnswer:
+    """The span the creator stated for a held key, which is the whole held
+    span where the creator stated it, runs to the last minute there is where
+    the creator stated a start and no end, and is nothing where the creator
+    stated no span."""
+    if key.explicit:
+        return _KeyAnswer(key.pem, key.first, key.last, True)
+    if key.open_ended:
+        return _KeyAnswer(key.pem, key.first, _LAST_MINUTE, True)
+    return _KeyAnswer(key.pem)
+
+
+def _stated(pem: str, start: Optional[int], end: Optional[int]) -> _KeyAnswer:
+    """The span the creator stated in its answer. See _stated_for."""
+    if start is None:
+        return _KeyAnswer(pem)
+    if end is not None and end > start:
+        return _KeyAnswer(pem, start, end - 1, True)
+    return _KeyAnswer(pem, start, _LAST_MINUTE, True)
 
 
 def _hold(
@@ -518,8 +578,8 @@ def _hold(
 ) -> _KeyAnswer:
     """Records the creator's answer to the URL, being the key and, where the
     creator stated it, the span the key covers as the minute it came into
-    force and the minute the next key starts. Returns the key with the span it
-    is now known to cover. Called under the lock.
+    force and the minute the next key starts. Returns the key with the span
+    the creator stated for it. Called under the lock.
 
     With both the start and the end the whole span is held as the creator's
     own statement. With the start alone the key is held from the start up to
@@ -531,32 +591,38 @@ def _hold(
     the cache must not grow on the input of whoever presents the identifiers.
     """
     global _held_keys
+    stated = _stated(pem, start, end)
     minute, recent = _minute_and_recency(url)
     explicit = False
+    open_ended = False
     if start is not None and end is not None and end > start:
         first, last, explicit = start, end - 1, True
     elif start is not None:
         now = io.minutes_since_base(datetime.now(timezone.utc))
         first = start
         last = max(start, now - CLOCK_DRIFT_ALLOWANCE_MINUTES)
+        open_ended = True
     elif minute is not None and not recent:
         first = last = minute
     else:
-        return _KeyAnswer(pem)
+        return stated
     keys = _cache.get(end_point)
     if keys is not None:
         for key in keys:
             if key.pem == pem:
                 if _widen(keys, key, first, last):
                     key.explicit = key.explicit or explicit
-                    return _KeyAnswer(pem, key.first, key.last, True)
-                # The creator has answered with another key inside this span
-                # before, which it does not do unless it went back to a key
-                # it had left. Nothing more is held about this key.
-                return _KeyAnswer(pem)
+                    key.open_ended = not key.explicit and (
+                        key.open_ended or open_ended
+                    )
+                # Where the span was not widened the creator has answered
+                # with another key inside it before, which it does not do
+                # unless it went back to a key it had left, and nothing more
+                # is held about this key.
+                return stated
         for other in keys:
             if other.last >= first and other.first <= last:
-                return _KeyAnswer(pem)
+                return stated
     if _held_keys >= MAXIMUM_CACHED_KEYS:
         _cache.clear()
         _held_keys = 0
@@ -564,9 +630,9 @@ def _hold(
     if keys is None:
         keys = []
         _cache[end_point] = keys
-    keys.append(_HeldKey(pem, first, last, explicit))
+    keys.append(_HeldKey(pem, first, last, explicit, open_ended))
     _held_keys += 1
-    return _KeyAnswer(pem, first, last, True)
+    return stated
 
 
 def _widen(keys: List[_HeldKey], key: _HeldKey, first: int, last: int) -> bool:
@@ -681,7 +747,7 @@ def _urllib_request(url: str, timeout: float) -> Tuple[int, bytes]:
     is returned as that code, and only the failure to obtain any response at
     all is raised."""
     request = urllib.request.Request(
-        url, headers={"Accept": "text/plain"}, method="GET"
+        url, headers={"Accept": "application/json"}, method="GET"
     )
     try:
         with _opener.open(request, timeout=timeout) as response:

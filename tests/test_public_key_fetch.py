@@ -66,6 +66,23 @@ ALONE: List[Owid] = []
 IDENTIFIER_DATE = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
 
+def date_of(url: str) -> Optional[int]:
+    """The minute a key URL asks about, or None where it names none."""
+    query = urllib.parse.urlsplit(url).query
+    value = dict(urllib.parse.parse_qsl(query)).get("date")
+    return None if value is None else int(value)
+
+
+def answer(
+    pem: str, valid_from: Optional[datetime], valid_to: Optional[datetime]
+) -> bytes:
+    """The body a creator answers with for the key and the span it states,
+    built by the package's own server side helper."""
+    return endpoints.public_key_answer(pem, valid_from, valid_to, None).encode(
+        "utf-8"
+    )
+
+
 def crafted(version: Version, domain: str, date: datetime) -> Owid:
     """Builds an OWID with the version, domain and date given and a signature
     of zeroes, for the cases that are about the URL rather than the
@@ -188,18 +205,21 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         """The same identifier against the same end point without the date,
         which is the request a port that forgets the date makes. The end
         point answers with the key in force at the moment of the request, ten
-        days after the identifier was signed, the signature does not match
-        that key, and a genuine identifier reads as a forgery."""
+        days after the identifier was signed, and states a span that does not
+        include the identifier's date. The signature does not match that key,
+        and because the creator has said the key was not in force at that
+        date the key is reported as unavailable rather than a genuine
+        identifier as a forgery."""
         owid = key_fixtures.identifier()
         end_point = self.end_point()
         undated = end_point.base + "/owid/api/v3/public-key?format=pkcs"
         self.assertIs(
-            SignatureStatus.SIGNATURE_INVALID,
+            SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch._signature_status_at_url(
                 owid, undated, ALONE
             ),
             "an undated request gets the key in force at the request, which "
-            "did not sign it",
+            "the creator says was not in force when the identifier was signed",
         )
         self.assertEqual([None], end_point.dates(), "the request carried no date")
 
@@ -629,12 +649,108 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         far = self._signed_at("creator.test", rotation + timedelta(minutes=20), first)
         self.assertIs(SignatureStatus.SIGNATURE_INVALID, await status_of(far),
                       "well inside the later key's span")
-        self.assertEqual(2, len(requests), "the neighbouring minutes lie inside the spans held")
+        self.assertEqual(2, len(requests), "the identifier is further from every edge than clocks may differ")
         genuine = self._signed_at("creator.test", rotation + timedelta(days=3), second)
         self.assertIs(SignatureStatus.SIGNATURE_VALID, await status_of(genuine))
         forged = self._signed_at("creator.test", rotation + timedelta(days=3), third)
         self.assertIs(SignatureStatus.SIGNATURE_INVALID, await status_of(forged),
                       "signed with a key not in force at its date")
+
+    async def test_the_neighbour_is_asked_for_by_the_minute_just_beyond_the_edge(
+        self,
+    ) -> None:
+        """The neighbouring key is asked for by the minute just beyond the
+        edge of the span the creator stated, not by a minute a fixed distance
+        from the identifier, so a key in force for less than the drift
+        allowance is still the one tried."""
+        first, second = Crypto.new(), Crypto.new()
+        week = timedelta(days=7)
+        end = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        rotation = end - week
+        start = rotation - week
+        asked: List[Optional[int]] = []
+
+        async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
+            date = date_of(url)
+            asked.append(date)
+            if date is not None and date < io.minutes_since_base(rotation):
+                return 200, answer(first.public_key_pem(), start, rotation)
+            return 200, answer(second.public_key_pem(), rotation, end)
+
+        late = self._signed_at("creator.test", rotation + timedelta(minutes=5), first)
+        self.assertIs(
+            SignatureStatus.SIGNATURE_VALID,
+            await public_key_fetch.signature_status(late, "https", ALONE, creator),
+        )
+        minute = io.minutes_since_base(rotation)
+        self.assertEqual(
+            [minute + 5, minute - 1],
+            asked,
+            "the identifier's own minute and then the minute just before the span started",
+        )
+
+    async def test_a_key_stated_without_an_end_has_no_later_edge(self) -> None:
+        """A key the creator states a start for and no end is in force until
+        further notice as far as the creator has said, so a live identifier
+        dated just after that start which does not verify under it is checked
+        against the key before it, even though the cache holds the key only
+        up to the drift allowance behind now."""
+        first, second = Crypto.new(), Crypto.new()
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        rotation = now - timedelta(minutes=5)
+        start = rotation - timedelta(days=7)
+        requests: List[str] = []
+
+        async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
+            requests.append(url)
+            date = date_of(url)
+            if date is not None and date < io.minutes_since_base(rotation):
+                return 200, answer(first.public_key_pem(), start, rotation)
+            return 200, answer(second.public_key_pem(), rotation, None)
+
+        live = self._signed_at("creator.test", rotation + timedelta(minutes=2), first)
+        self.assertIs(
+            SignatureStatus.SIGNATURE_VALID,
+            await public_key_fetch.signature_status(live, "https", ALONE, creator),
+            "a live identifier signed with the key before the current one verifies",
+        )
+        self.assertEqual(
+            2, len(requests), "the current key and then the key before it were asked for"
+        )
+
+    async def test_a_key_the_creator_says_was_not_in_force_leaves_the_signature_unjudged(
+        self,
+    ) -> None:
+        """A creator whose own statement puts the identifier's date outside
+        the span of the key it answered with has said that key did not sign
+        at that date, so nothing verifying under it leaves the key
+        unavailable rather than the signature not matching. A forgery dated
+        inside the span is still reported as not matching."""
+        first, second, stranger = Crypto.new(), Crypto.new(), Crypto.new()
+        end = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        rotation = end - timedelta(days=7)
+
+        # A creator that ignores the date asked about and answers with the
+        # current key and its span whatever the request.
+        async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
+            return 200, answer(second.public_key_pem(), rotation, end)
+
+        earlier = self._signed_at("creator.test", rotation - timedelta(days=3), first)
+        self.assertIs(
+            SignatureStatus.KEY_UNAVAILABLE,
+            await public_key_fetch.signature_status(earlier, "https", ALONE, creator),
+            "the key answered with was not in force at the identifier's date",
+        )
+        self.assertFalse(
+            await public_key_fetch.verify(earlier, "https", ALONE, creator),
+            "the boolean form answers True for a genuine signature alone",
+        )
+        forged = self._signed_at("creator.test", rotation + timedelta(days=3), stranger)
+        self.assertIs(
+            SignatureStatus.SIGNATURE_INVALID,
+            await public_key_fetch.signature_status(forged, "https", ALONE, creator),
+            "a signature failing under the key in force at its date does not match",
+        )
 
     async def test_an_answer_that_is_not_the_json_form_is_a_key_that_cannot_be_read(self) -> None:
         """The PEM alone as text is reported as a key this package cannot read rather than used, and so is a span that ends before it starts."""
