@@ -38,8 +38,11 @@ keeps its promise of no dependency beyond cryptography. This module is the
 one place in the package that reaches the network, and it is imported only
 when a caller asks for it.
 
-Keys already fetched are held, and two callers who await the same key at the
-same moment share one request rather than making two.
+Keys already fetched are held by creator, each against the span of minutes
+the creator has confirmed it for, so an identifier dated inside a confirmed
+span is verified without a request whichever minute it carries. Two callers
+who await the same key at the same moment share one request rather than
+making two.
 
 The Java port answers the same question with PublicKeyFetch, the Rust port
 with Owid::verify_status and the Go port with SignatureStatusFromDomain.
@@ -53,7 +56,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Awaitable, Callable, Dict, Optional, Sequence, Tuple
+from datetime import datetime, timezone
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import endpoints, io
 from .error import OwidError, PublicKeyFetchError
@@ -63,9 +67,10 @@ from .status import SignatureStatus
 #: How long to wait for the connection and then for the response, in seconds.
 TIMEOUT_SECONDS = 10.0
 
-#: The most keys held before the cache is emptied and filled again. A bound is
-#: needed because a verifier sees identifiers from many domains and many
-#: weeks, and an unbounded store would grow for as long as the process runs.
+#: The most keys held before the cache is emptied and filled again, across
+#: every creator. A bound is needed because a verifier sees identifiers from
+#: many domains and many weeks, and an unbounded store would grow for as long
+#: as the process runs.
 MAXIMUM_CACHED_KEYS = 1024
 
 #: The most bytes accepted from a response. A public key PEM is a few hundred
@@ -86,15 +91,48 @@ Transport = Callable[[str, float], Awaitable[Tuple[int, bytes]]]
 #: than opened.
 _ACCEPTED_SCHEMES = ("http", "https")
 
-#: Keys already fetched, held against the URL they were fetched from.
+class _HeldKey:
+    """One key a creator has answered with, and the span of minutes the
+    creator has confirmed it was in force for.
+
+    A creator's key is in force from the start of its period until the next
+    key starts, so a key the creator confirms at two minutes was in force at
+    every minute between them. The span grows as the creator confirms the
+    same key for more minutes, and an identifier dated inside it is verified
+    without a request.
+    """
+
+    __slots__ = ("pem", "first", "last")
+
+    def __init__(self, pem: str, minute: int) -> None:
+        #: The key in PEM form, as the creator served it.
+        self.pem = pem
+        #: The earliest minute the creator has confirmed the key for.
+        self.first = minute
+        #: The latest minute the creator has confirmed the key for.
+        self.last = minute
+
+    def covers(self, minute: int) -> bool:
+        """Whether the minute lies within the confirmed span."""
+        return self.first <= minute <= self.last
+
+
+#: Keys already fetched, by the creator's key end point, which is the key URL
+#: without its date. Each end point holds the keys the creator has answered
+#: with, each with the span of minutes the creator has confirmed it for.
 #:
 #: The specification asks implementations to cache so that verifying many
-#: identifiers does not mean repeating requests to another processor. Holding
-#: the key against the whole URL is safe because the URL names the domain,
-#: the version and the minute, and the key a creator published for a minute
-#: in the past does not change.
-_cache: Dict[str, str] = {}
-
+#: identifiers does not mean repeating requests to another processor. The key
+#: URL carries the date of the identifier being verified, in minutes, and a
+#: creator's key changes on the order of a week. Keyed by the whole URL, as
+#: this cache once was, two identifiers signed a minute apart never shared an
+#: entry, so a hundred identifiers over a hundred minutes made a hundred
+#: requests for one key. Keyed by end point and span, an identifier dated
+#: between two minutes the creator has already answered for is verified
+#: without a request.
+_cache: Dict[str, List[_HeldKey]] = {}
+#: How many keys are held across every end point.
+_held_keys = 0
 #: Fetches still running, held against the URL, so that a caller who asks for
 #: a key while the request for it is in flight awaits that request rather
 #: than making another. An entry is removed when its fetch finishes, whatever
@@ -102,10 +140,9 @@ _cache: Dict[str, str] = {}
 #: on a different loop, which only happens where two loops run in two
 #: threads, cannot await it and starts a fetch of its own.
 _in_flight: Dict[str, "asyncio.Task[str]"] = {}
-
-#: Guards both stores. An event loop runs one coroutine at a time, but the
-#: stores are shared by every loop in the process, and the lock is only ever
-#: held across a few dictionary operations and never across an await.
+#: Guards all three stores. An event loop runs one coroutine at a time, but
+#: the stores are shared by every loop in the process, and the lock is only
+#: ever held across a few dictionary operations and never across an await.
 _lock = threading.Lock()
 
 
@@ -204,11 +241,21 @@ async def verify(
 def clear_cache() -> None:
     """Empties the cache of keys already fetched, and forgets the fetches
     still in flight so that the next caller for any key starts a request of
-    its own. Provided so that a long running process can release the memory,
-    and so that a test can start from a known state."""
+    its own. A fetch already running is not stopped, and the callers awaiting
+    it still receive its answer. This is how a long running process drops a
+    key it has learned it should no longer trust, after a creator rotates its
+    key following a compromise, and how a test starts from a known state."""
+    global _held_keys
     with _lock:
         _cache.clear()
+        _held_keys = 0
         _in_flight.clear()
+
+
+def _cached_key_count() -> int:
+    """How many keys the cache holds, for the tests."""
+    with _lock:
+        return _held_keys
 
 
 async def _signature_status_at_url(
@@ -232,17 +279,22 @@ async def _signature_status_at_url(
 async def _public_key_pem_at_url(
     url: str, domain: str, transport: Optional[Transport] = None
 ) -> str:
-    """Fetches the PEM at the URL, answering from the cache where the same URL
-    has already been fetched, and awaiting the request already in flight
-    where another caller on this event loop is fetching the same URL now."""
+    """Fetches the PEM at the URL. Answered from the cache where the creator
+    has already confirmed a key for the minute the URL names, from the
+    request already in flight where another caller on this event loop is
+    fetching the same URL now, and otherwise by asking the creator."""
     loop = asyncio.get_running_loop()
+    end_point = _end_point_of(url)
+    minute = _minute_of(url)
     with _lock:
-        cached = _cache.get(url)
-        if cached is not None:
-            return cached
+        held = _held_pem(end_point, minute)
+        if held is not None:
+            return held
         fetch = _in_flight.get(url)
         if fetch is None or fetch.get_loop() is not loop:
-            fetch = loop.create_task(_fetch_and_hold(url, domain, transport))
+            fetch = loop.create_task(
+                _fetch_and_hold(url, end_point, minute, domain, transport)
+            )
             fetch.add_done_callback(_mark_observed)
             _in_flight[url] = fetch
     # Shielded, because cancelling one caller must not cancel the request
@@ -253,11 +305,16 @@ async def _public_key_pem_at_url(
 
 
 async def _fetch_and_hold(
-    url: str, domain: str, transport: Optional[Transport]
+    url: str,
+    end_point: str,
+    minute: int,
+    domain: str,
+    transport: Optional[Transport],
 ) -> str:
     """The one request for a URL, run as a task that every caller waiting for
-    that URL awaits. Holds the answer, and forgets the task whatever the
-    outcome so that a failed fetch is tried again by the next caller."""
+    that URL awaits. Holds the answer against the minute asked about, and
+    forgets the task whatever the outcome so that a failed fetch is tried
+    again by the next caller."""
     task = asyncio.current_task()
     pem: Optional[str] = None
     try:
@@ -265,12 +322,100 @@ async def _fetch_and_hold(
         return pem
     finally:
         with _lock:
+            if pem is not None:
+                _hold(end_point, minute, pem)
             if _in_flight.get(url) is task:
                 del _in_flight[url]
-            if pem is not None:
-                if len(_cache) >= MAXIMUM_CACHED_KEYS:
-                    _cache.clear()
-                _cache[url] = pem
+
+
+def _end_point_of(url: str) -> str:
+    """The key URL without its query, which names the scheme, the creator and
+    the version, and so the key end point being asked."""
+    return url.split("?", 1)[0]
+
+
+def _minute_of(url: str) -> int:
+    """The minute the cache reads the URL as asking about.
+
+    The date parameter where the URL carries one, and otherwise now, because
+    a creator answers a request without a date with the key in force now. A
+    date later than now is read as now as well, because that is how a creator
+    reads it. A schedule is published ahead of time and a key that has not
+    started has signed nothing, so the creator answers a future date with the
+    key in force now, and that answer must be held against now rather than
+    against a minute the creator has not spoken for. Held against the future
+    minute, the key would still be served for that minute after the creator
+    had rotated, and a genuine identifier signed then would read as not
+    matching.
+    """
+    now = io.minutes_since_base(datetime.now(timezone.utc))
+    query = urllib.parse.urlsplit(url).query
+    for name, value in urllib.parse.parse_qsl(query):
+        if name == "date":
+            try:
+                return min(int(value), now)
+            except ValueError:
+                return now
+    return now
+
+
+def _held_pem(end_point: str, minute: int) -> Optional[str]:
+    """The key held for the end point whose confirmed span covers the minute,
+    or None where no held key does. Called under the lock."""
+    for key in _cache.get(end_point, ()):
+        if key.covers(minute):
+            return key.pem
+    return None
+
+
+def _hold(end_point: str, minute: int, pem: str) -> None:
+    """Records that the creator answered the minute with the key. Called
+    under the lock.
+
+    A key already held for the end point has its span widened to take in the
+    minute. A key not held before is added, emptying the cache first when it
+    is full, because the domains and dates asked about come from the
+    identifiers presented to this process and the cache must not grow on
+    their input.
+    """
+    global _held_keys
+    keys = _cache.get(end_point)
+    if keys is not None:
+        for key in keys:
+            if key.pem == pem and _widen(keys, key, minute):
+                return
+    if _held_keys >= MAXIMUM_CACHED_KEYS:
+        _cache.clear()
+        _held_keys = 0
+        keys = None
+    if keys is None:
+        keys = []
+        _cache[end_point] = keys
+    keys.append(_HeldKey(pem, minute))
+    _held_keys += 1
+
+
+def _widen(keys: List[_HeldKey], key: _HeldKey, minute: int) -> bool:
+    """Widens the span of a held key to take in the minute, and says whether
+    the minute is now within it.
+
+    The span is not widened across a minute the creator has answered with
+    another key for, because that would mean the creator had gone back to a
+    key it had left, and the minutes between the two spans are then not this
+    key's to claim. The key is held again as a separate span instead.
+    """
+    if key.covers(minute):
+        return True
+    start = min(minute, key.first)
+    end = max(minute, key.last)
+    for other in keys:
+        if other is not key and other.last > start and other.first < end:
+            return False
+    if minute < key.first:
+        key.first = minute
+    else:
+        key.last = minute
+    return True
 
 
 def _mark_observed(task: "asyncio.Task[str]") -> None:

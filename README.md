@@ -171,13 +171,21 @@ the path is the version byte of the identifier being checked and the minutes
 are counted from 2020-01-01 in the same way the identifier stores its date. A
 creator that ignores the parameter returns its current key, so every
 identifier it signed under an earlier key reads as not matching, which is why
-a creator that rotates its key has to honour the date. Keys already fetched
-are held against the URL they came from, which names the domain, the version
-and the minute, up to 1024 of them before the store is emptied, and
-`clear_cache()` empties it on demand. Two callers who await the same key at
-the same moment share one request rather than making two. Each request waits
-at most ten seconds. Every function that reaches the network is a coroutine,
-so a caller awaits it, and there is no synchronous form.
+a creator that rotates its key has to honour the date.
+
+Keys already fetched are held by creator, each against the span of minutes
+the creator has confirmed it for. A key is in force from the start of its
+period until the next key starts, so a key the creator answers with at two
+minutes was in force at every minute between them, and an identifier dated
+inside a confirmed span is verified without a request whichever minute it
+carries. One dated outside every span is asked about, which widens the span
+when the same key comes back. At most 1024 keys are held across every
+creator before the store is emptied and filled again, and `clear_cache()`
+empties it on demand, which is how a long running process drops a key it has
+learned it should no longer trust. Two callers who await the same key at the
+same moment share one request rather than making two. Each request waits at
+most ten seconds. Every function that reaches the network is a coroutine, so
+a caller awaits it, and there is no synchronous form.
 
 ```python
 import asyncio

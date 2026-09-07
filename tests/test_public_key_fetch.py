@@ -293,8 +293,8 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_keys_are_held_per_request_and_not_per_domain(self) -> None:
-        """Keys are held against the URL they came from, which names the
-        minute, so two identifiers from different weeks fetch two different
+        """Keys are held against the span of minutes the creator confirmed
+        them for, so two identifiers from different weeks fetch two different
         keys and a key held for one week never answers for another. A store
         keyed by domain alone would hand the second identifier the first
         one's key."""
@@ -348,6 +348,173 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
                 end_point.url_for(weeks[0]), key_fixtures.IDENTIFIER_DOMAIN
             )
             self.assertEqual(4, len(end_point.dates()))
+
+    @staticmethod
+    def _at(moment: datetime) -> Owid:
+        """An identifier from the fixture domain dated at the moment."""
+        return crafted(Version.VERSION3, key_fixtures.IDENTIFIER_DOMAIN, moment)
+
+    @staticmethod
+    async def _pem_at(end_point: KeyEndPoint, moment: datetime) -> str:
+        """The PEM the fetch answers for an identifier dated at the moment."""
+        return await public_key_fetch._public_key_pem_at_url(
+            end_point.url_for(PublicKeyFetchTests._at(moment)),
+            key_fixtures.IDENTIFIER_DOMAIN,
+        )
+
+    @staticmethod
+    def _in_force(moment: datetime) -> str:
+        """The PEM the published schedule says was in force at the moment."""
+        key = key_fixtures.schedule().key_in_force(moment)
+        assert key is not None
+        return key.public_key_pem
+
+    async def test_a_minute_between_two_confirmed_minutes_is_served_from_the_cache(
+        self,
+    ) -> None:
+        """A key the creator has confirmed for two minutes is served for every
+        minute between them without a request, because a key is in force from
+        the start of its period until the next key starts. A minute outside
+        every confirmed span is asked about."""
+        end_point = self.end_point()
+        # The week of 31 August 2026, which the fixture identifier was signed
+        # in, and which is wholly in the past so the cache reads each minute
+        # as itself rather than as now.
+        first = datetime(2026, 8, 31, 0, 1, tzinfo=timezone.utc)
+        last = datetime(2026, 9, 6, 23, 0, tzinfo=timezone.utc)
+        pem = await self._pem_at(end_point, first)
+        self.assertEqual(pem, await self._pem_at(end_point, last), "one key covers the week")
+        self.assertEqual(2, len(end_point.dates()), "the two ends of the span were asked about")
+        for between in (
+            first + timedelta(minutes=1),
+            first + timedelta(days=3),
+            last - timedelta(minutes=1),
+        ):
+            self.assertEqual(pem, await self._pem_at(end_point, between))
+        self.assertEqual(
+            2, len(end_point.dates()), "a minute between two confirmed minutes is not asked about"
+        )
+        self.assertEqual(
+            1, public_key_fetch._cached_key_count(), "one key is held however many minutes it covers"
+        )
+        self.assertNotEqual(
+            pem,
+            await self._pem_at(end_point, first - timedelta(minutes=2)),
+            "a minute in the week before is the earlier week's key",
+        )
+        self.assertEqual(3, len(end_point.dates()), "a minute before the span is asked about")
+        self.assertEqual(
+            2, public_key_fetch._cached_key_count(), "the earlier week's key is held as a second key"
+        )
+
+    async def test_a_hundred_identifiers_in_one_confirmed_period_make_no_request(
+        self,
+    ) -> None:
+        """The case that made the cache almost useless when it was keyed by
+        the whole URL. A hundred identifiers with a hundred different minutes
+        inside one key's period cost a hundred requests then. With the ends
+        of the period confirmed they cost none."""
+        end_point = self.end_point()
+        start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        await self._pem_at(end_point, start)
+        await self._pem_at(end_point, start + timedelta(minutes=100))
+        for i in range(1, 101):
+            await self._pem_at(end_point, start + timedelta(minutes=i))
+        self.assertEqual(
+            2,
+            len(end_point.dates()),
+            "a hundred identifiers over a hundred minutes made no request "
+            "once both ends of the span were known",
+        )
+
+    async def test_a_key_is_never_served_for_a_minute_outside_its_confirmed_span(
+        self,
+    ) -> None:
+        """A key is only ever served for a minute inside the span the creator
+        has confirmed it for. Where the creator rotated between two confirmed
+        minutes, the minutes between them belong to neither key until the
+        creator is asked, and every answer agrees with the published
+        schedule."""
+        end_point = self.end_point()
+        rotation = datetime(2026, 8, 31, tzinfo=timezone.utc)
+        week = timedelta(days=7)
+        minute = timedelta(minutes=1)
+        # The start of the week before the rotation and the end of the week
+        # after it, so the two keys are held with the rotation between.
+        await self._pem_at(end_point, rotation - week)
+        await self._pem_at(end_point, rotation + week - minute)
+        self.assertEqual(2, len(end_point.dates()))
+        self.assertEqual(2, public_key_fetch._cached_key_count())
+
+        # Every minute across the rotation, in an order that walks in from
+        # both sides, is answered with the key the schedule gives, whether
+        # from the cache or by asking.
+        moments = [
+            rotation - minute,
+            rotation,
+            rotation - 2 * minute,
+            rotation + minute,
+            rotation - week / 2,
+            rotation + week / 2,
+            rotation - 3 * minute,
+            rotation + 2 * minute,
+            rotation - minute,
+            rotation,
+        ]
+        for moment in moments:
+            self.assertEqual(
+                self._in_force(moment),
+                await self._pem_at(end_point, moment),
+                "the key served for {0}".format(moment),
+            )
+        self.assertEqual(
+            2, public_key_fetch._cached_key_count(), "two keys are held, each with its own span"
+        )
+        asked = len(end_point.dates())
+        self.assertTrue(
+            2 < asked < 2 + len(moments),
+            "some minutes were asked about and some were served: {0}".format(asked),
+        )
+
+        # The minute either side of the rotation is now confirmed, so nothing
+        # across the whole fortnight needs asking.
+        moment = rotation - week
+        while moment < rotation + week:
+            self.assertEqual(
+                self._in_force(moment),
+                await self._pem_at(end_point, moment),
+                "the key served for {0}".format(moment),
+            )
+            moment += timedelta(hours=1)
+        self.assertEqual(
+            asked, len(end_point.dates()), "both spans are fully confirmed, so nothing was asked"
+        )
+
+    async def test_a_future_date_is_held_against_now(self) -> None:
+        """A date later than now is held against now, because a creator
+        answers a future date with the key in force now and a key held
+        against a minute the creator has not spoken for would be served for
+        that minute after the creator had rotated. Two future dates therefore
+        share one request, and so does a request with no date."""
+        end_point = self.end_point()
+        started = io.minutes_since_base(datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        await self._pem_at(end_point, now + timedelta(days=7))
+        await self._pem_at(end_point, now + timedelta(days=14))
+        await public_key_fetch._public_key_pem_at_url(
+            end_point.base + "/owid/api/v3/public-key?format=pkcs",
+            key_fixtures.IDENTIFIER_DOMAIN,
+        )
+        if io.minutes_since_base(datetime.now(timezone.utc)) != started:
+            self.skipTest(
+                "the minute changed during the test, so the calls were not "
+                "all about the same now"
+            )
+        self.assertEqual(
+            1,
+            len(end_point.dates()),
+            "two future dates and no date are all now, and now was asked about once",
+        )
 
     async def test_concurrent_awaits_for_one_key_share_one_request(
         self,
