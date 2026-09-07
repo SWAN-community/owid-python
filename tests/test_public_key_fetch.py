@@ -490,30 +490,43 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             asked, len(end_point.dates()), "both spans are fully confirmed, so nothing was asked"
         )
 
-    async def test_a_future_date_is_held_against_now(self) -> None:
-        """A date later than now is held against now, because a creator
-        answers a future date with the key in force now and a key held
-        against a minute the creator has not spoken for would be served for
-        that minute after the creator had rotated. Two future dates therefore
-        share one request, and so does a request with no date."""
+    async def test_a_minute_within_the_drift_allowance_is_not_held(self) -> None:
+        """A minute within the clock drift allowance of now, or later, is
+        asked about every time and never held, because a creator whose clock
+        differs from this one's may have read it as its present rather than
+        as the minute named. A minute beyond the allowance is held as usual.
+        Live identifiers therefore cost one request per minute per creator,
+        as they always did, and older ones cost none."""
         end_point = self.end_point()
         started = io.minutes_since_base(datetime.now(timezone.utc))
         now = datetime.now(timezone.utc)
+        recent = now - timedelta(minutes=1)
+        await self._pem_at(end_point, recent)
+        await self._pem_at(end_point, recent)
         await self._pem_at(end_point, now + timedelta(days=7))
-        await self._pem_at(end_point, now + timedelta(days=14))
         await public_key_fetch._public_key_pem_at_url(
             end_point.base + "/owid/api/v3/public-key?format=pkcs",
             key_fixtures.IDENTIFIER_DOMAIN,
         )
+        old = now - timedelta(
+            minutes=public_key_fetch.CLOCK_DRIFT_ALLOWANCE_MINUTES + 1
+        )
+        await self._pem_at(end_point, old)
+        await self._pem_at(end_point, old)
         if io.minutes_since_base(datetime.now(timezone.utc)) != started:
             self.skipTest(
                 "the minute changed during the test, so the calls were not "
                 "all about the same now"
             )
         self.assertEqual(
-            1,
+            5,
             len(end_point.dates()),
-            "two future dates and no date are all now, and now was asked about once",
+            "the recent minute was asked about twice, the future minute and "
+            "the request with no date once each, and the old minute once "
+            "with the second call held",
+        )
+        self.assertEqual(
+            1, public_key_fetch._cached_key_count(), "only the old minute's key is held"
         )
 
     async def test_concurrent_awaits_for_one_key_share_one_request(

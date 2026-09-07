@@ -72,6 +72,20 @@ TIMEOUT_SECONDS = 10.0
 #: many domains and many weeks, and an unbounded store would grow for as long
 #: as the process runs.
 MAXIMUM_CACHED_KEYS = 1024
+#: How far a creator's clock may run ahead of or behind this one's, in
+#: minutes. A minute closer to now than this, or later, is asked about rather
+#: than served from the cache, and is not held.
+#:
+#: A creator reads a date later than its own now as now, and answers with the
+#: key in force now. Within this window this process cannot tell whether the
+#: creator read the minute as its past or as its present, so the answer says
+#: nothing certain about the minute. An identifier signed just after a
+#: rotation by a creator whose clock runs ahead would otherwise be served the
+#: old key from a span confirmed up to now, and would read as not matching
+#: until this clock caught up. Identifiers dated within the window are asked
+#: about once per minute per creator, as they always were, and every older
+#: identifier is served from the spans.
+CLOCK_DRIFT_ALLOWANCE_MINUTES = 15
 
 #: The most bytes accepted from a response. A public key PEM is a few hundred
 #: bytes, so a body beyond this is not a key and is not held or decoded.
@@ -287,7 +301,7 @@ async def _public_key_pem_at_url(
     end_point = _end_point_of(url)
     minute = _minute_of(url)
     with _lock:
-        held = _held_pem(end_point, minute)
+        held = None if minute is None else _held_pem(end_point, minute)
         if held is not None:
             return held
         fetch = _in_flight.get(url)
@@ -307,7 +321,7 @@ async def _public_key_pem_at_url(
 async def _fetch_and_hold(
     url: str,
     end_point: str,
-    minute: int,
+    minute: Optional[int],
     domain: str,
     transport: Optional[Transport],
 ) -> str:
@@ -322,7 +336,7 @@ async def _fetch_and_hold(
         return pem
     finally:
         with _lock:
-            if pem is not None:
+            if pem is not None and minute is not None:
                 _hold(end_point, minute, pem)
             if _in_flight.get(url) is task:
                 del _in_flight[url]
@@ -334,29 +348,28 @@ def _end_point_of(url: str) -> str:
     return url.split("?", 1)[0]
 
 
-def _minute_of(url: str) -> int:
-    """The minute the cache reads the URL as asking about.
+def _minute_of(url: str) -> Optional[int]:
+    """The minute the cache reads the URL as asking about, or None where the
+    cache must not be used for the request.
 
-    The date parameter where the URL carries one, and otherwise now, because
-    a creator answers a request without a date with the key in force now. A
-    date later than now is read as now as well, because that is how a creator
-    reads it. A schedule is published ahead of time and a key that has not
-    started has signed nothing, so the creator answers a future date with the
-    key in force now, and that answer must be held against now rather than
-    against a minute the creator has not spoken for. Held against the future
-    minute, the key would still be served for that minute after the creator
-    had rotated, and a genuine identifier signed then would read as not
-    matching.
+    The date parameter where the URL carries one and it is at least
+    CLOCK_DRIFT_ALLOWANCE_MINUTES behind now. A request without a date asks
+    for the key in force now, and one dated within the allowance, or later,
+    may be read by the creator as its present rather than as the minute
+    named, so neither is served from the cache nor held in it.
     """
     now = io.minutes_since_base(datetime.now(timezone.utc))
     query = urllib.parse.urlsplit(url).query
     for name, value in urllib.parse.parse_qsl(query):
         if name == "date":
             try:
-                return min(int(value), now)
+                minute = int(value)
             except ValueError:
-                return now
-    return now
+                return None
+            if 0 <= minute <= now - CLOCK_DRIFT_ALLOWANCE_MINUTES:
+                return minute
+            return None
+    return None
 
 
 def _held_pem(end_point: str, minute: int) -> Optional[str]:
