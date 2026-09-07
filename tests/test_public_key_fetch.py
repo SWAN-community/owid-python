@@ -33,12 +33,19 @@ import inspect
 import os
 import pathlib
 import unittest
+import time
+import threading
+import urllib.parse
+import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 from unittest import mock
 
 from owid import (
     Creator,
+    DatedPublicKey,
+    PublicKeySchedule,
+    endpoints,
     Crypto,
     Owid,
     OwidError,
@@ -376,7 +383,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         minute between them without a request, because a key is in force from
         the start of its period until the next key starts. A minute outside
         every confirmed span is asked about."""
-        end_point = self.end_point()
+        end_point = self.end_point(Answer.SPANLESS)
         # The week of 31 August 2026, which the fixture identifier was signed
         # in, and which is wholly in the past so the cache reads each minute
         # as itself rather than as now.
@@ -414,7 +421,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         the whole URL. A hundred identifiers with a hundred different minutes
         inside one key's period cost a hundred requests then. With the ends
         of the period confirmed they cost none."""
-        end_point = self.end_point()
+        end_point = self.end_point(Answer.SPANLESS)
         start = datetime(2026, 9, 1, tzinfo=timezone.utc)
         await self._pem_at(end_point, start)
         await self._pem_at(end_point, start + timedelta(minutes=100))
@@ -435,7 +442,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         minutes, the minutes between them belong to neither key until the
         creator is asked, and every answer agrees with the published
         schedule."""
-        end_point = self.end_point()
+        end_point = self.end_point(Answer.SPANLESS)
         rotation = datetime(2026, 8, 31, tzinfo=timezone.utc)
         week = timedelta(days=7)
         minute = timedelta(minutes=1)
@@ -495,9 +502,8 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         asked about every time and never held, because a creator whose clock
         differs from this one's may have read it as its present rather than
         as the minute named. A minute beyond the allowance is held as usual.
-        Live identifiers therefore cost one request per minute per creator,
-        as they always did, and older ones cost none."""
-        end_point = self.end_point()
+        Live identifiers therefore cost one request per minute per creator and older ones cost none."""
+        end_point = self.end_point(Answer.SPANLESS)
         started = io.minutes_since_base(datetime.now(timezone.utc))
         now = datetime.now(timezone.utc)
         recent = now - timedelta(minutes=1)
@@ -529,6 +535,176 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             1, public_key_fetch._cached_key_count(), "only the old minute's key is held"
         )
 
+    async def test_a_key_answered_with_its_span_is_held_for_the_whole_span(self) -> None:
+        """A creator that states the moments the key is valid from and to,
+        which is what the package's own server side helper answers, has the
+        whole span held from that one answer, so every other minute of the
+        span is served without a request."""
+        end_point = self.end_point()
+        pem = await self._pem_at(end_point, datetime(2026, 8, 31, 0, 1, tzinfo=timezone.utc))
+        for moment in (
+            datetime(2026, 9, 6, 23, 59, tzinfo=timezone.utc),
+            datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
+            datetime(2026, 8, 31, tzinfo=timezone.utc),
+        ):
+            self.assertEqual(pem, await self._pem_at(end_point, moment), str(moment))
+        self.assertEqual(1, len(end_point.dates()), "the whole week was held from one answer")
+        self.assertEqual(1, public_key_fetch._cached_key_count())
+        before = await self._pem_at(end_point, datetime(2026, 8, 30, 23, 59, tzinfo=timezone.utc))
+        self.assertNotEqual(pem, before, "the minute before the week is the earlier week's key")
+        await self._pem_at(end_point, datetime(2026, 8, 24, tzinfo=timezone.utc))
+        self.assertEqual(2, len(end_point.dates()), "the earlier week was held from its one answer")
+
+    async def test_a_recent_minute_is_served_where_the_creator_stated_the_span(self) -> None:
+        """The drift allowance, which keeps minutes near now out of a cache
+        built from confirmed minutes, does not apply to a span the creator
+        stated itself, so live identifiers cost one request per key rather
+        than one per minute."""
+        end_point = self.end_point()
+        now = datetime.now(timezone.utc)
+        current = key_fixtures.schedule().key_in_force(now)
+        if current is None or key_fixtures.schedule().next_start_after(current) is None:
+            self.skipTest("the fixture schedule has no key after the one in force now")
+        await self._pem_at(end_point, now - timedelta(minutes=1))
+        await self._pem_at(end_point, now)
+        await self._pem_at(end_point, now - timedelta(minutes=10))
+        self.assertEqual(
+            1, len(end_point.dates()), "the current key was served for every recent minute from one answer"
+        )
+
+    @staticmethod
+    def _signed_at(domain: str, moment: datetime, crypto: Crypto) -> Owid:
+        """An identifier for the domain dated at the moment and signed with
+        the crypto given, standing for one whose signing machine's clock did
+        not agree with the creator's schedule to the minute."""
+        owid = Owid._create(
+            version=Version.VERSION3, domain=domain, date=moment, payload=b"payload"
+        )
+        owid._signature = crypto.sign_byte_array(owid.data_for_crypto([]))
+        return owid
+
+    async def test_a_signature_failing_near_the_edge_of_a_span_is_checked_against_the_neighbour(
+        self,
+    ) -> None:
+        """An identifier dated just after a key started, but signed with the
+        key before it, verifies, and one dated just before a key started but
+        signed with it verifies too, because the neighbouring key is tried
+        when the selected key fails within the drift allowance of the span's
+        edge. Further from the edge the failure stands. The stand in creator
+        answers with the package's own server side helper, so the loop
+        between the two halves of the package is closed."""
+        first, second, third = Crypto.new(), Crypto.new(), Crypto.new()
+        rotation = datetime(2026, 8, 31, tzinfo=timezone.utc)
+        week = timedelta(days=7)
+        schedule = PublicKeySchedule(
+            [
+                DatedPublicKey(rotation - week, first.public_key_pem()),
+                DatedPublicKey(rotation, second.public_key_pem()),
+                DatedPublicKey(rotation + week, third.public_key_pem()),
+            ]
+        )
+        requests: List[str] = []
+
+        async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
+            requests.append(url)
+            date = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query)).get("date")
+            status, body = endpoints.public_key_response_at(schedule, "pkcs", date)
+            return status, body.encode("utf-8")
+
+        url = "https://creator.test/owid/api/v3/public-key?date={0}&format=pkcs"
+
+        async def status_of(owid: Owid) -> SignatureStatus:
+            return await public_key_fetch._signature_status_at_url(
+                owid, url.format(io.minutes_since_base(owid.date)), None, creator
+            )
+
+        late = self._signed_at("creator.test", rotation + timedelta(minutes=5), first)
+        self.assertIs(SignatureStatus.SIGNATURE_VALID, await status_of(late),
+                      "signed with the earlier key just after the rotation")
+        self.assertEqual(2, len(requests), "the selected key and then the earlier key were asked for")
+        early = self._signed_at("creator.test", rotation - timedelta(minutes=5), second)
+        self.assertIs(SignatureStatus.SIGNATURE_VALID, await status_of(early),
+                      "signed with the later key just before the rotation")
+        self.assertEqual(2, len(requests), "both keys are held with their spans")
+        far = self._signed_at("creator.test", rotation + timedelta(minutes=20), first)
+        self.assertIs(SignatureStatus.SIGNATURE_INVALID, await status_of(far),
+                      "well inside the later key's span")
+        self.assertEqual(2, len(requests), "the neighbouring minutes lie inside the spans held")
+        genuine = self._signed_at("creator.test", rotation + timedelta(days=3), second)
+        self.assertIs(SignatureStatus.SIGNATURE_VALID, await status_of(genuine))
+        forged = self._signed_at("creator.test", rotation + timedelta(days=3), third)
+        self.assertIs(SignatureStatus.SIGNATURE_INVALID, await status_of(forged),
+                      "signed with a key not in force at its date")
+
+    async def test_an_answer_that_is_not_the_json_form_is_a_key_that_cannot_be_read(self) -> None:
+        """The PEM alone as text is reported as a key this package cannot read rather than used, and so is a span that ends before it starts."""
+        end_point = self.end_point(Answer.PEM_ONLY)
+        owid = key_fixtures.identifier()
+        self.assertIs(
+            SignatureStatus.INVALID_KEY,
+            await public_key_fetch._signature_status_at_url(owid, end_point.url_for(owid)),
+        )
+
+        async def contradictory(url: str, timeout: float) -> Tuple[int, bytes]:
+            return 200, json.dumps(
+                {
+                    "publicKeySPKI": key_fixtures.schedule().keys[0].public_key_pem,
+                    "validFrom": "2026-08-31T00:00:00Z",
+                    "validTo": "2026-08-24T00:00:00Z",
+                }
+            ).encode("utf-8")
+
+        self.assertIs(
+            SignatureStatus.INVALID_KEY,
+            await public_key_fetch._signature_status_at_url(
+                owid, end_point.url_for(owid), None, contradictory
+            ),
+        )
+
+    def test_many_threads_verifying_one_owid_together_make_one_request(self) -> None:
+        """Threads verifying the same OWID at the same moment, each on its own
+        event loop, make one request for its key between them, and every one
+        of them gets the answer. The stand in transport holds its answer until
+        every thread has asked, so all of them are in flight together against
+        one request."""
+        callers = 8
+        owid = key_fixtures.identifier()
+        pem = key_fixtures.schedule().key_for(owid).public_key_pem
+        answer = endpoints.public_key_answer(pem, None, None, None).encode("utf-8")
+        requests: List[str] = []
+        release = threading.Event()
+        started = threading.Barrier(callers + 1)
+
+        async def transport(url: str, timeout: float) -> Tuple[int, bytes]:
+            requests.append(url)
+            await asyncio.get_running_loop().run_in_executor(None, release.wait)
+            return 200, answer
+
+        url = public_key_fetch.public_key_url(owid, "https")
+        statuses: List[SignatureStatus] = []
+
+        def verify() -> None:
+            started.wait()
+            statuses.append(
+                asyncio.run(
+                    public_key_fetch._signature_status_at_url(owid, url, None, transport)
+                )
+            )
+
+        threads = [threading.Thread(target=verify) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        # Every thread goes at the same moment, and the transport only
+        # answers once they are all waiting on it.
+        started.wait()
+        time.sleep(0.3)
+        release.set()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(callers, len(statuses), "every thread finished")
+        self.assertEqual({SignatureStatus.SIGNATURE_VALID}, set(statuses))
+        self.assertEqual(1, len(requests), "one request for {0} threads".format(callers))
+
     async def test_concurrent_awaits_for_one_key_share_one_request(
         self,
     ) -> None:
@@ -546,7 +722,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             calls.append(url)
             arrived.set()
             await release.wait()
-            return 200, pem.encode("utf-8")
+            return 200, endpoints.public_key_answer(pem, None, None, None).encode("utf-8")
 
         first = asyncio.ensure_future(
             public_key_fetch.public_key_pem(owid, "https", held_open)
@@ -653,7 +829,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         async def held_open(url: str, timeout: float) -> Tuple[int, bytes]:
             calls.append(url)
             await release.wait()
-            return 200, pem.encode("utf-8")
+            return 200, endpoints.public_key_answer(pem, None, None, None).encode("utf-8")
 
         first = asyncio.ensure_future(
             public_key_fetch.public_key_pem(owid, "https", held_open)
@@ -733,7 +909,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
 
         async def transport(url: str, timeout: float) -> Tuple[int, bytes]:
             calls.append((url, timeout))
-            return 200, pem.encode("utf-8")
+            return 200, endpoints.public_key_answer(pem, None, None, None).encode("utf-8")
 
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
@@ -765,7 +941,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         following = keys[keys.index(signing) + 1]
 
         async def wrong_week(url: str, timeout: float) -> Tuple[int, bytes]:
-            return 200, following.public_key_pem.encode("utf-8")
+            return 200, endpoints.public_key_answer(following.public_key_pem, None, None, None).encode("utf-8")
 
         self.assertFalse(
             await public_key_fetch.verify(owid, "https", ALONE, wrong_week),

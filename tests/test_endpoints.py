@@ -61,7 +61,10 @@ class EndpointTests(unittest.TestCase):
         creator = _new_creator()
         for fmt in ("spki", "pkcs"):
             body = endpoints.public_key_response(creator, fmt)
-            self.assertIn("BEGIN PUBLIC KEY", body)
+            answer = json.loads(body)
+            self.assertIn("BEGIN PUBLIC KEY", answer["publicKeySPKI"])
+            self.assertIsNone(answer["validFrom"], "a single key has no schedule")
+            self.assertIsNone(answer["validTo"])
 
     def test_public_key_response_invalid_format(self) -> None:
         creator = _new_creator()

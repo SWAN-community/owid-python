@@ -38,11 +38,14 @@ keeps its promise of no dependency beyond cryptography. This module is the
 one place in the package that reaches the network, and it is imported only
 when a caller asks for it.
 
-Keys already fetched are held by creator, each against the span of minutes
-the creator has confirmed it for, so an identifier dated inside a confirmed
-span is verified without a request whichever minute it carries. Two callers
-who await the same key at the same moment share one request rather than
-making two.
+The creator answers with the key and the moments it is valid from and to, and
+the key is held by creator for that whole span, so an identifier dated inside
+it is verified without a request whichever minute it carries. A creator that
+states no span has its key held against the minutes it confirms. A signature
+that fails under the key selected, where the identifier is dated within the
+clock drift allowance of the edge of that key's span, is checked against the
+neighbouring key before it is reported as not matching. Two callers who await
+the same key at the same moment share one request rather than making two.
 
 The Java port answers the same question with PublicKeyFetch, the Rust port
 with Owid::verify_status and the Go port with SignatureStatusFromDomain.
@@ -51,7 +54,9 @@ with Owid::verify_status and the Go port with SignatureStatusFromDomain.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import http.client
+import json
 import threading
 import urllib.error
 import urllib.parse
@@ -60,6 +65,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import endpoints, io
+from .endpoints import validate_public_key_answer
 from .error import OwidError, PublicKeyFetchError
 from .owid import Owid
 from .status import SignatureStatus
@@ -73,18 +79,16 @@ TIMEOUT_SECONDS = 10.0
 #: as the process runs.
 MAXIMUM_CACHED_KEYS = 1024
 #: How far a creator's clock may run ahead of or behind this one's, in
-#: minutes. A minute closer to now than this, or later, is asked about rather
-#: than served from the cache, and is not held.
+#: minutes.
 #:
-#: A creator reads a date later than its own now as now, and answers with the
-#: key in force now. Within this window this process cannot tell whether the
-#: creator read the minute as its past or as its present, so the answer says
-#: nothing certain about the minute. An identifier signed just after a
-#: rotation by a creator whose clock runs ahead would otherwise be served the
-#: old key from a span confirmed up to now, and would read as not matching
-#: until this clock caught up. Identifiers dated within the window are asked
-#: about once per minute per creator, as they always were, and every older
-#: identifier is served from the spans.
+#: It is used in two places. A creator that does not state the span of the key
+#: it answers with reads a date later than its own now as now, so within this
+#: window of now this process cannot tell whether the creator read the minute
+#: as its past or as its present, and nothing learned from such an answer is
+#: held or served. And a creator's signing machines may not agree with the
+#: creator's own schedule to the minute, so an identifier dated within this
+#: window of a key's edge that does not verify under that key is checked
+#: against the neighbouring key before it is reported as not matching.
 CLOCK_DRIFT_ALLOWANCE_MINUTES = 15
 
 #: The most bytes accepted from a response. A public key PEM is a few hundred
@@ -106,29 +110,52 @@ Transport = Callable[[str, float], Awaitable[Tuple[int, bytes]]]
 _ACCEPTED_SCHEMES = ("http", "https")
 
 class _HeldKey:
-    """One key a creator has answered with, and the span of minutes the
-    creator has confirmed it was in force for.
+    """One key a creator has answered with, and the span of minutes the key
+    is known to cover.
 
     A creator's key is in force from the start of its period until the next
     key starts, so a key the creator confirms at two minutes was in force at
-    every minute between them. The span grows as the creator confirms the
-    same key for more minutes, and an identifier dated inside it is verified
-    without a request.
+    every minute between them. Where the creator stated the span in its
+    answer the span is explicit and complete, and an identifier dated
+    anywhere inside it is verified without a request. Otherwise the span
+    grows as the creator confirms the same key for more minutes.
     """
 
-    __slots__ = ("pem", "first", "last")
+    __slots__ = ("pem", "first", "last", "explicit")
 
-    def __init__(self, pem: str, minute: int) -> None:
+    def __init__(self, pem: str, first: int, last: int, explicit: bool) -> None:
         #: The key in PEM form, as the creator served it.
         self.pem = pem
-        #: The earliest minute the creator has confirmed the key for.
-        self.first = minute
-        #: The latest minute the creator has confirmed the key for.
-        self.last = minute
+        #: The earliest minute the key is known to cover.
+        self.first = first
+        #: The latest minute the key is known to cover.
+        self.last = last
+        #: Whether the creator stated the whole span itself.
+        self.explicit = explicit
 
     def covers(self, minute: int) -> bool:
-        """Whether the minute lies within the confirmed span."""
+        """Whether the minute lies within the known span."""
         return self.first <= minute <= self.last
+
+
+class _KeyAnswer:
+    """What the cache or a fetch answers with. The key, and where it is known,
+    the span of minutes the key covers, so that a caller can tell whether the
+    identifier it is checking sits near the edge of the span."""
+
+    __slots__ = ("pem", "first", "last", "known")
+
+    def __init__(
+        self, pem: str, first: int = 0, last: int = 0, known: bool = False
+    ) -> None:
+        self.pem = pem
+        self.first = first
+        self.last = last
+        self.known = known
+
+    def covers(self, minute: int) -> bool:
+        """Whether the minute lies within the known span."""
+        return self.known and self.first <= minute <= self.last
 
 
 #: Keys already fetched, by the creator's key end point, which is the key URL
@@ -138,10 +165,7 @@ class _HeldKey:
 #: The specification asks implementations to cache so that verifying many
 #: identifiers does not mean repeating requests to another processor. The key
 #: URL carries the date of the identifier being verified, in minutes, and a
-#: creator's key changes on the order of a week. Keyed by the whole URL, as
-#: this cache once was, two identifiers signed a minute apart never shared an
-#: entry, so a hundred identifiers over a hundred minutes made a hundred
-#: requests for one key. Keyed by end point and span, an identifier dated
+#: creator's key changes on the order of a week. Keyed by end point and span rather than by the whole URL, an identifier dated
 #: between two minutes the creator has already answered for is verified
 #: without a request.
 _cache: Dict[str, List[_HeldKey]] = {}
@@ -149,11 +173,10 @@ _cache: Dict[str, List[_HeldKey]] = {}
 _held_keys = 0
 #: Fetches still running, held against the URL, so that a caller who asks for
 #: a key while the request for it is in flight awaits that request rather
-#: than making another. An entry is removed when its fetch finishes, whatever
-#: the outcome. A task belongs to the event loop that created it, so a caller
-#: on a different loop, which only happens where two loops run in two
-#: threads, cannot await it and starts a fetch of its own.
-_in_flight: Dict[str, "asyncio.Task[str]"] = {}
+#: than making another. Each is a future any thread can wait on, so callers
+#: on different event loops in different threads share one request as well.
+#: An entry is removed when its fetch finishes, whatever the outcome.
+_in_flight: Dict[str, "concurrent.futures.Future[_KeyAnswer]"] = {}
 #: Guards all three stores. An event loop runs one coroutine at a time, but
 #: the stores are shared by every loop in the process, and the lock is only
 #: ever held across a few dictionary operations and never across an await.
@@ -282,64 +305,173 @@ async def _signature_status_at_url(
     that the tests drive the real fetch against a key end point the tests can
     stand up locally rather than against a near copy of the fetch."""
     try:
-        pem = await _public_key_pem_at_url(url, owid.domain, transport)
+        answer = await _key_at_url(url, owid.domain, transport)
     except PublicKeyFetchError as failed:
         return failed.status
     except OwidError:
         return SignatureStatus.KEY_UNAVAILABLE
-    return owid.signature_status(pem, others)
+    status = owid.signature_status(answer.pem, others)
+    if status is SignatureStatus.SIGNATURE_INVALID and await _neighbour_verifies(
+        owid, url, answer, others, transport
+    ):
+        return SignatureStatus.SIGNATURE_VALID
+    return status
+
+
+async def _neighbour_verifies(
+    owid: Owid,
+    url: str,
+    tried: _KeyAnswer,
+    others: Optional[Sequence[Owid]],
+    transport: Optional[Transport],
+) -> bool:
+    """Whether a key neighbouring the one the OWID's own minute selected
+    verifies the signature instead.
+
+    A creator's signing machines may not agree with its own schedule to the
+    minute, so an identifier dated just after a key started may have been
+    signed with the key before it, and one dated just before may have been
+    signed with the key after. Where the signature does not verify under the
+    key selected and the OWID's minute is within the clock drift allowance of
+    the edge of the span that key is known to cover, the key for the minute
+    just beyond that edge is asked for and tried. A key already known to cover
+    the neighbouring minute is not asked for again, and a neighbour that turns
+    out to be the same key is not tried again. This costs at most two more
+    requests, and only for a signature that has already failed.
+    """
+    minute = io.minutes_since_base(owid.date)
+    if minute < 0:
+        return False
+    if tried.known and not tried.covers(minute):
+        # The key tried was never in force at the identifier's minute, so
+        # the identifier is not near an edge of that key's span. This is an
+        # undated request answered with the current key, or a creator whose
+        # answer did not cover the minute asked about, and the neighbours of
+        # the minute have nothing to do with the key tried.
+        return False
+    for at in (minute - CLOCK_DRIFT_ALLOWANCE_MINUTES, minute + CLOCK_DRIFT_ALLOWANCE_MINUTES):
+        if at < 0 or at > 0xFFFFFFFF or tried.covers(at):
+            continue
+        try:
+            neighbour = await _key_at_url(
+                "{0}?date={1}&format=pkcs".format(_end_point_of(url), at),
+                owid.domain,
+                transport,
+            )
+        except OwidError:
+            # A neighbour that cannot be obtained leaves the failure under
+            # the selected key standing.
+            continue
+        if neighbour.pem == tried.pem:
+            continue
+        if owid.signature_status(neighbour.pem, others) is SignatureStatus.SIGNATURE_VALID:
+            return True
+    return False
 
 
 async def _public_key_pem_at_url(
     url: str, domain: str, transport: Optional[Transport] = None
 ) -> str:
-    """Fetches the PEM at the URL. Answered from the cache where the creator
-    has already confirmed a key for the minute the URL names, from the
-    request already in flight where another caller on this event loop is
-    fetching the same URL now, and otherwise by asking the creator."""
+    """The PEM of the key the URL asks for. See _key_at_url."""
+    return (await _key_at_url(url, domain, transport)).pem
+
+
+async def _key_at_url(
+    url: str, domain: str, transport: Optional[Transport] = None
+) -> _KeyAnswer:
+    """Fetches the key the URL asks for, with the span it is known to cover.
+    Answered from the cache where a held key is known to cover the minute the
+    URL names, from the request already in flight where another caller on this
+    event loop is fetching the same URL now, and otherwise by asking the
+    creator."""
     loop = asyncio.get_running_loop()
     end_point = _end_point_of(url)
-    minute = _minute_of(url)
     with _lock:
-        held = None if minute is None else _held_pem(end_point, minute)
+        held = _held_for(end_point, url)
         if held is not None:
             return held
-        fetch = _in_flight.get(url)
-        if fetch is None or fetch.get_loop() is not loop:
-            fetch = loop.create_task(
-                _fetch_and_hold(url, end_point, minute, domain, transport)
-            )
-            fetch.add_done_callback(_mark_observed)
-            _in_flight[url] = fetch
+        shared = _in_flight.get(url)
+        lead = shared is None
+        if shared is None:
+            shared = concurrent.futures.Future()
+            _in_flight[url] = shared
+    if lead:
+        # This caller is the one that adds the entry, so this caller is the
+        # one that performs the request. Every other caller arriving before
+        # it ends, on this loop or any other, waits on the future just added.
+        task = loop.create_task(_fetch_and_hold(url, end_point, domain, transport, shared))
+        task.add_done_callback(_mark_observed)
     # Shielded, because cancelling one caller must not cancel the request
     # that other callers are waiting on, and a request on a worker thread
     # cannot be stopped part way in any case. The answer still lands in the
     # cache for the next caller.
-    return await asyncio.shield(fetch)
+    return await asyncio.shield(asyncio.wrap_future(shared))
 
 
 async def _fetch_and_hold(
     url: str,
     end_point: str,
-    minute: Optional[int],
     domain: str,
     transport: Optional[Transport],
-) -> str:
-    """The one request for a URL, run as a task that every caller waiting for
-    that URL awaits. Holds the answer against the minute asked about, and
-    forgets the task whatever the outcome so that a failed fetch is tried
-    again by the next caller."""
-    task = asyncio.current_task()
-    pem: Optional[str] = None
+    shared: "concurrent.futures.Future[_KeyAnswer]",
+) -> _KeyAnswer:
+    """The one request for a URL, run as a task whose outcome every caller
+    waiting for that URL receives through the shared future. Holds the answer
+    against the span it states, or the minute asked about where it states
+    none, and forgets the request whatever the outcome so that a failed fetch
+    is tried again by the next caller."""
     try:
-        pem = await _read(url, domain, transport)
-        return pem
-    finally:
+        body = await _read(url, domain, transport)
+        pem, start, end = _parse_answer(body, domain)
         with _lock:
-            if pem is not None and minute is not None:
-                _hold(end_point, minute, pem)
-            if _in_flight.get(url) is task:
+            answer = _hold(end_point, url, pem, start, end)
+            if _in_flight.get(url) is shared:
                 del _in_flight[url]
+        shared.set_result(answer)
+        return answer
+    except BaseException as failed:
+        with _lock:
+            if _in_flight.get(url) is shared:
+                del _in_flight[url]
+        shared.set_exception(failed)
+        raise
+
+
+def _parse_answer(body: str, domain: str) -> Tuple[str, Optional[int], Optional[int]]:
+    """Reads a public key answer, returning the PEM and the span in minutes
+    since the base date. The end is the minute the next key starts. Either is
+    None where the answer does not state it. An answer that is not the JSON
+    form the specification requires, the PEM alone among the other forms, or
+    that fails the checks a creator applies before sending it, is reported as
+    a key that cannot be read."""
+    try:
+        answer = json.loads(body)
+    except ValueError as failed:
+        raise PublicKeyFetchError(
+            "domain {0} did not answer with the JSON form the specification "
+            "requires for the public key".format(_quoted(domain)),
+            SignatureStatus.INVALID_KEY,
+            domain,
+        ) from failed
+    try:
+        pem, valid_from, valid_to = validate_public_key_answer(answer, None)
+    except OwidError as failed:
+        raise PublicKeyFetchError(
+            "domain {0} answered with a public key answer that is not valid: "
+            "{1}".format(_quoted(domain), failed),
+            SignatureStatus.INVALID_KEY,
+            domain,
+        ) from failed
+    return pem, _minutes_or_none(valid_from), _minutes_or_none(valid_to)
+
+
+def _minutes_or_none(moment: Optional[datetime]) -> Optional[int]:
+    """The moment as minutes since the base date, or None where there is no
+    moment or it is before the count begins."""
+    if moment is None:
+        return None
+    minutes = io.minutes_since_base(moment)
+    return minutes if minutes >= 0 else None
 
 
 def _end_point_of(url: str) -> str:
@@ -348,16 +480,11 @@ def _end_point_of(url: str) -> str:
     return url.split("?", 1)[0]
 
 
-def _minute_of(url: str) -> Optional[int]:
-    """The minute the cache reads the URL as asking about, or None where the
-    cache must not be used for the request.
-
-    The date parameter where the URL carries one and it is at least
-    CLOCK_DRIFT_ALLOWANCE_MINUTES behind now. A request without a date asks
-    for the key in force now, and one dated within the allowance, or later,
-    may be read by the creator as its present rather than as the minute
-    named, so neither is served from the cache nor held in it.
-    """
+def _minute_and_recency(url: str) -> Tuple[Optional[int], bool]:
+    """The minute the URL asks about, or None where it names none, and whether
+    it lies within the clock drift allowance of now or later, which is a
+    minute a creator that does not state its spans may have read as its
+    present rather than as the minute named."""
     now = io.minutes_since_base(datetime.now(timezone.utc))
     query = urllib.parse.urlsplit(url).query
     for name, value in urllib.parse.parse_qsl(query):
@@ -365,38 +492,71 @@ def _minute_of(url: str) -> Optional[int]:
             try:
                 minute = int(value)
             except ValueError:
-                return None
-            if 0 <= minute <= now - CLOCK_DRIFT_ALLOWANCE_MINUTES:
-                return minute
-            return None
-    return None
+                return None, False
+            return minute, minute > now - CLOCK_DRIFT_ALLOWANCE_MINUTES
+    return None, False
 
 
-def _held_pem(end_point: str, minute: int) -> Optional[str]:
-    """The key held for the end point whose confirmed span covers the minute,
-    or None where no held key does. Called under the lock."""
+def _held_for(end_point: str, url: str) -> Optional[_KeyAnswer]:
+    """The key held for the end point that is known to cover the minute the
+    URL asks about, or None where none is. Called under the lock.
+
+    A minute within the drift allowance of now is only served where the
+    creator itself stated the span, because a span confirmed minute by minute
+    says nothing certain about such a minute."""
+    minute, recent = _minute_and_recency(url)
+    if minute is None:
+        return None
     for key in _cache.get(end_point, ()):
-        if key.covers(minute):
-            return key.pem
+        if key.covers(minute) and (key.explicit or not recent):
+            return _KeyAnswer(key.pem, key.first, key.last, True)
     return None
 
 
-def _hold(end_point: str, minute: int, pem: str) -> None:
-    """Records that the creator answered the minute with the key. Called
-    under the lock.
+def _hold(
+    end_point: str, url: str, pem: str, start: Optional[int], end: Optional[int]
+) -> _KeyAnswer:
+    """Records the creator's answer to the URL, being the key and, where the
+    creator stated it, the span the key covers as the minute it came into
+    force and the minute the next key starts. Returns the key with the span it
+    is now known to cover. Called under the lock.
 
-    A key already held for the end point has its span widened to take in the
-    minute. A key not held before is added, emptying the cache first when it
-    is full, because the domains and dates asked about come from the
-    identifiers presented to this process and the cache must not grow on
-    their input.
+    With both the start and the end the whole span is held as the creator's
+    own statement. With the start alone the key is held from the start up to
+    the drift allowance behind now, because no later key can have started
+    before then. With neither the minute asked about is held on its own, as
+    long as it is not within the drift allowance of now. A key already held
+    for the end point has its span widened to take in the new one. A key not
+    held before is added, emptying the cache first when it is full, because
+    the cache must not grow on the input of whoever presents the identifiers.
     """
     global _held_keys
+    minute, recent = _minute_and_recency(url)
+    explicit = False
+    if start is not None and end is not None and end > start:
+        first, last, explicit = start, end - 1, True
+    elif start is not None:
+        now = io.minutes_since_base(datetime.now(timezone.utc))
+        first = start
+        last = max(start, now - CLOCK_DRIFT_ALLOWANCE_MINUTES)
+    elif minute is not None and not recent:
+        first = last = minute
+    else:
+        return _KeyAnswer(pem)
     keys = _cache.get(end_point)
     if keys is not None:
         for key in keys:
-            if key.pem == pem and _widen(keys, key, minute):
-                return
+            if key.pem == pem:
+                if _widen(keys, key, first, last):
+                    key.explicit = key.explicit or explicit
+                    return _KeyAnswer(pem, key.first, key.last, True)
+                # The creator has answered with another key inside this span
+                # before, which it does not do unless it went back to a key
+                # it had left. Nothing more is held about this key.
+                return _KeyAnswer(pem)
+        for other in keys:
+            if other.last >= first and other.first <= last:
+                return _KeyAnswer(pem)
     if _held_keys >= MAXIMUM_CACHED_KEYS:
         _cache.clear()
         _held_keys = 0
@@ -404,34 +564,31 @@ def _hold(end_point: str, minute: int, pem: str) -> None:
     if keys is None:
         keys = []
         _cache[end_point] = keys
-    keys.append(_HeldKey(pem, minute))
+    keys.append(_HeldKey(pem, first, last, explicit))
     _held_keys += 1
+    return _KeyAnswer(pem, first, last, True)
 
 
-def _widen(keys: List[_HeldKey], key: _HeldKey, minute: int) -> bool:
-    """Widens the span of a held key to take in the minute, and says whether
-    the minute is now within it.
+def _widen(keys: List[_HeldKey], key: _HeldKey, first: int, last: int) -> bool:
+    """Widens the span of a held key to take in the span given, and says
+    whether it did.
 
     The span is not widened across a minute the creator has answered with
     another key for, because that would mean the creator had gone back to a
     key it had left, and the minutes between the two spans are then not this
-    key's to claim. The key is held again as a separate span instead.
+    key's to claim.
     """
-    if key.covers(minute):
-        return True
-    start = min(minute, key.first)
-    end = max(minute, key.last)
+    first = min(first, key.first)
+    last = max(last, key.last)
     for other in keys:
-        if other is not key and other.last > start and other.first < end:
+        if other is not key and other.last >= first and other.first <= last:
             return False
-    if minute < key.first:
-        key.first = minute
-    else:
-        key.last = minute
+    key.first = first
+    key.last = last
     return True
 
 
-def _mark_observed(task: "asyncio.Task[str]") -> None:
+def _mark_observed(task: "asyncio.Task[_KeyAnswer]") -> None:
     """Reads the outcome of a finished fetch, so that a failure nobody was
     left waiting for, because every caller was cancelled, is not reported by
     asyncio as an exception that was never retrieved."""
