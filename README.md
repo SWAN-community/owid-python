@@ -166,9 +166,10 @@ anything older than a few days means asking for the key that was in force on
 the date the identifier carries.
 
 `owid.public_key_fetch` asks the creator for that key. The request is
-`/owid/api/v{n}/public-key?date={minutes}&format=pkcs`, where the version in
-the path is the version byte of the identifier being checked and the minutes
-are counted from 2020-01-01 in the same way the identifier stores its date. A
+`/owid/api/v{n}/public-key?date={minutes}&format=spki`, where the version in
+the path is the version byte of the identifier being checked, the minutes are
+counted from 2020-01-01 in the same way the identifier stores its date, and
+the format names the one encoding of the key this package reads. A
 creator that ignores the parameter returns its current key, so every
 identifier it signed under an earlier key reads as not matching, which is why
 a creator that rotates its key has to honour the date.
@@ -464,15 +465,19 @@ opaque crypto error.
 - `public_key_path(version)` returns the well known path of the public key end
   point.
 - `public_key_response(creator, format)` returns the JSON body of the public
-  key end point for a creator with one key, the key as `publicKeySPKI` with
-  `validFrom` and `validTo` null. `public_key_response_at` states both moments
-  from the schedule, and `public_key_answer` builds and checks any answer, so
-  a key that cannot be read or a schedule that contradicts itself is refused
-  before it is sent. The PEM alone as text is no longer a valid answer. The
-  format must be `spki` or `pkcs`.
+  key end point for a creator with one key, the key as `publicKey`, the
+  encoding it is in as `format`, and `validFrom` and `validTo` null.
+  `public_key_response_at` states both moments from the schedule, and
+  `public_key_answer` builds and checks any answer, so a key that cannot be
+  read or a schedule that contradicts itself is refused before it is sent.
+  The PEM alone as text is not a valid answer. The one format defined is
+  `spki`, a Subject Public Key Info PEM. It is what a request without a
+  `format` receives, and any other value is refused rather than answered in
+  an encoding the caller did not ask for.
 - `public_key_response_at(schedule, format, date, now=None)` returns the
   status code and body for a creator that rotates its key, choosing from a
-  `PublicKeySchedule` the way the specification requires.
+  `PublicKeySchedule` the way the specification requires, and answers 400 to
+  a `format` other than `spki`.
 
 `public_key_fetch`
 

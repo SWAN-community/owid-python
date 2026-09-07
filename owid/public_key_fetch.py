@@ -17,10 +17,11 @@
 on the domain the OWID carries, asking for the key that was in force on the
 date the OWID carries.
 
-The end point is /owid/api/v{n}/public-key?date={minutes}&format=pkcs, where
+The end point is /owid/api/v{n}/public-key?date={minutes}&format=spki, where
 the version in the path is the version byte of the OWID being checked rather
-than a constant, and the minutes are counted from 2020-01-01 in the same way
-the OWID stores the date. Creators rotate weekly, so without the date only
+than a constant, the minutes are counted from 2020-01-01 in the same way the
+OWID stores the date, and the format names the one encoding of the key this
+package reads. Creators rotate weekly, so without the date only
 identifiers signed since the most recent rotation can be verified and every
 older one reads as not matching. A creator that ignores the parameter returns
 its current key, so every identifier it signed under an earlier key reads as
@@ -235,9 +236,9 @@ def public_key_url(owid: Owid, scheme: str) -> str:
     _check_domain(domain)
     minutes = io.minutes_since_base(owid.date)
     if minutes >= 0:
-        query = "date={0}&format=pkcs".format(minutes)
+        query = "date={0}&format={1}".format(minutes, endpoints.SPKI_FORMAT)
     else:
-        query = "format=pkcs"
+        query = "format={0}".format(endpoints.SPKI_FORMAT)
     return "{0}://{1}{2}?{3}".format(
         scheme, domain, endpoints.public_key_path(owid.version), query
     )
@@ -386,7 +387,9 @@ async def _neighbour_verifies(
     for at in beyond:
         try:
             neighbour = await _key_at_url(
-                "{0}?date={1}&format=pkcs".format(_end_point_of(url), at),
+                "{0}?date={1}&format={2}".format(
+                    _end_point_of(url), at, endpoints.SPKI_FORMAT
+                ),
                 owid.domain,
                 transport,
             )

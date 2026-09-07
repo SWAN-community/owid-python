@@ -19,16 +19,18 @@ specification.
 These are framework agnostic. They return the path and body so that any HTTP
 server can serve them. The mandatory end point is the public key end point at
 /owid/api/v{version}/public-key returning the public key as a JSON object.
-The format query parameter must be spki or pkcs.
 
 The public key end point answers with a JSON object carrying the key as
-publicKeySPKI together with validFrom and validTo, the UTC moments the key came
-into force and the next key starts, so a client holds the key for the whole
-span from one answer. A creator that rotates its signing key answers the
-optional date parameter with public_key_response_at, which chooses from the
-published schedule the way the specification requires. Every answer is checked
-with validate_public_key_answer before it is returned, so a creator never sends
-an answer a client would refuse.
+publicKey, the encoding it is in as format, and validFrom and validTo, the UTC
+moments the key came into force and the next key starts, so a client holds the
+key for the whole span from one answer. The only format defined is spki, a
+Subject Public Key Info PEM. It is the value taken when the request has no
+format parameter, and a creator answers 400 to any other value. A creator that
+rotates its signing key answers the optional date parameter with
+public_key_response_at, which chooses from the published schedule the way the
+specification requires. Every answer is checked with
+validate_public_key_answer before it is returned, so a creator never sends an
+answer a client would refuse.
 """
 
 from __future__ import annotations
@@ -44,6 +46,11 @@ from .error import OwidError
 from .public_key_schedule import PublicKeySchedule
 from .version import Version
 
+#: The one encoding of the key this package reads and writes, a Subject
+#: Public Key Info PEM. It is the value of the format parameter a request
+#: without one is read as asking for, and the value every answer states.
+SPKI_FORMAT = "spki"
+
 
 def public_key_path(version: Version) -> str:
     """Returns the path of the public key end point for the version provided.
@@ -51,25 +58,31 @@ def public_key_path(version: Version) -> str:
     return "/owid/api/v{0}/public-key".format(version.as_byte())
 
 
-def public_key_response(creator: Creator, format: str) -> str:
+def public_key_response(creator: Creator, format: Optional[str]) -> str:
     """Returns the JSON body for the public key end point of a creator with
-    one key and no schedule. The key is stated as publicKeySPKI and both
-    validFrom and validTo are null, because the creator knows nothing about
-    when the key started or will stop.
+    one key and no schedule. The key is stated as publicKey in the spki
+    format and both validFrom and validTo are null, because the creator knows
+    nothing about when the key started or will stop.
 
-    The specification allows the key to be requested in SPKI or PKCS form.
-    This implementation returns the SPKI PEM for both values because the
-    importers in every implementation accept it.
+    The format is the request's format parameter, or None where the request
+    has none, which is read as spki.
 
-    Raises OwidError if the format is not spki or pkcs, or the key cannot be
-    read.
+    Raises OwidError if the format is not spki, which a creator answers 400,
+    or the key cannot be read.
     """
-    if format not in ("spki", "pkcs"):
-        raise OwidError(
-            "format parameter 'spki' or 'pkcs' must be provided, "
-            "received '{0}'".format(format)
-        )
+    _check_format(format)
     return public_key_answer(creator.crypto.subject_public_key_info(), None, None, None)
+
+
+def _check_format(format: Optional[str]) -> None:
+    """Raises OwidError where the format is present and is not the one this
+    package serves."""
+    if format is not None and format != SPKI_FORMAT:
+        raise OwidError(
+            "the only format defined is '{0}', received '{1}'".format(
+                SPKI_FORMAT, format
+            )
+        )
 
 
 def public_key_answer(
@@ -79,14 +92,16 @@ def public_key_answer(
     asked: Optional[datetime],
 ) -> str:
     """Returns the JSON body of the public key end point for the key and the
-    span it covers, checked with validate_public_key_answer first so that a
-    creator never sends an answer it would itself refuse. The moment asked
-    about, where known, is checked against the span as well.
+    span it covers, stating the key in the spki format and checked with
+    validate_public_key_answer first so that a creator never sends an answer
+    it would itself refuse. The moment asked about, where known, is checked
+    against the span as well.
 
     Raises OwidError if the answer would not be valid.
     """
     answer = {
-        "publicKeySPKI": public_key_pem,
+        "format": SPKI_FORMAT,
+        "publicKey": public_key_pem,
         "validFrom": _moment_text(valid_from),
         "validTo": _moment_text(valid_to),
     }
@@ -101,18 +116,22 @@ def validate_public_key_answer(
     the client that reads it must, returning the key and the moments it is
     valid from and to.
 
-    The key must be a public key this package can read, a key valid to a
-    moment must be valid from an earlier one, and where the moment asked about
-    is known the key must have come into force by then and, if it has an end,
-    not have ended. A creator that fails this check has a fault in its
-    schedule or its store, and answering with a server error shows it up
-    rather than passing it on.
+    The format, where stated, must be the one this package reads and the key
+    must be a public key in it, a key valid to a moment must be valid from an
+    earlier one, and where the moment asked about is known the key must have
+    come into force by then and, if it has an end, not have ended. A creator
+    that fails this check has a fault in its schedule or its store, and
+    answering with a server error shows it up rather than passing it on.
 
     Raises OwidError where the answer is not valid.
     """
     if not isinstance(answer, Mapping):
         raise OwidError("the public key answer is not a JSON object")
-    pem = answer.get("publicKeySPKI")
+    if answer.get("format", SPKI_FORMAT) != SPKI_FORMAT:
+        raise OwidError(
+            "the public key answer states a format this package does not read"
+        )
+    pem = answer.get("publicKey")
     if not isinstance(pem, str) or not pem.strip():
         raise OwidError("the public key answer holds no key")
     try:
@@ -179,7 +198,7 @@ def _moment_of(value: Any, field: str) -> Optional[datetime]:
     return moment.astimezone(timezone.utc)
 def public_key_response_at(
     schedule: PublicKeySchedule,
-    format: str,
+    format: Optional[str],
     date: Union[str, int, None],
     now: Optional[datetime] = None,
 ) -> Tuple[int, str]:
@@ -187,25 +206,28 @@ def public_key_response_at(
     a creator that rotates its key, chosen from the schedule the way the
     specification requires.
 
-    The date parameter is the OWID's own date, counted in whole minutes since
+    The format parameter names the encoding of the key in the answer. The
+    only value defined is spki, which a request without the parameter is
+    read as asking for, and any other value is answered 400 with an empty
+    body rather than in an encoding the caller did not ask for. The date
+    parameter is the OWID's own date, counted in whole minutes since
     2020-01-01, and the key served is the one in force then, being the latest
     key whose start is at or before it. A request without a date, or with a
     date later than the moment of the request, is served the key in force at
     that moment, so a caller cannot ask for a key whose period has not begun.
     The answer is 200 with the JSON body from public_key_answer, stating the
-    key and the moments it is valid from and to, 404 with an empty body where
-    no key is in force at the date, and 400 with an empty body where the date
-    is not a count of minutes. The moment of the request is now, and a test
-    may supply it.
+    key, its format and the moments it is valid from and to, 404 with an
+    empty body where no key is in force at the date, and 400 with an empty
+    body where the date is not a count of minutes. The moment of the request
+    is now, and a test may supply it.
 
-    Raises OwidError if the format is not spki or pkcs, or the answer would
-    fail validate_public_key_answer, which is a fault in the schedule.
+    Raises OwidError if the answer would fail validate_public_key_answer,
+    which is a fault in the schedule.
     """
-    if format not in ("spki", "pkcs"):
-        raise OwidError(
-            "format parameter 'spki' or 'pkcs' must be provided, "
-            "received '{0}'".format(format)
-        )
+    try:
+        _check_format(format)
+    except OwidError:
+        return 400, ""
     moment = now if now is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
         # Read as UTC, the only zone the wire format knows, so this agrees

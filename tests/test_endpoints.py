@@ -35,18 +35,24 @@ class EndpointTests(unittest.TestCase):
         )
 
     def test_public_key_response_formats(self) -> None:
+        """The one format defined is answered whether it is asked for by name
+        or the request has no format, and the answer names it."""
         creator = _new_creator()
-        for fmt in ("spki", "pkcs"):
+        for fmt in ("spki", None):
             body = endpoints.public_key_response(creator, fmt)
             answer = json.loads(body)
-            self.assertIn("BEGIN PUBLIC KEY", answer["publicKeySPKI"])
+            self.assertEqual("spki", answer["format"], "the answer names the encoding of the key")
+            self.assertIn("BEGIN PUBLIC KEY", answer["publicKey"])
             self.assertIsNone(answer["validFrom"], "a single key has no schedule")
             self.assertIsNone(answer["validTo"])
 
     def test_public_key_response_invalid_format(self) -> None:
+        """Any other format is refused rather than answered in an encoding
+        the caller did not ask for."""
         creator = _new_creator()
-        with self.assertRaises(OwidError):
-            endpoints.public_key_response(creator, "other")
+        for fmt in ("pkcs", "other"):
+            with self.assertRaises(OwidError):
+                endpoints.public_key_response(creator, fmt)
 
 
 if __name__ == "__main__":

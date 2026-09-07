@@ -58,7 +58,8 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         moments it is valid from and to from the schedule."""
         return json.dumps(
             {
-                "publicKeySPKI": key.public_key_pem,
+                "format": "spki",
+                "publicKey": key.public_key_pem,
                 "validFrom": key.starts_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "validTo": (
                     None
@@ -73,7 +74,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         self.assertEqual(
             (200, self.answer(self.last_week)),
             endpoints.public_key_response_at(
-                self.schedule, "pkcs", self.minutes(asked), self.now
+                self.schedule, "spki", self.minutes(asked), self.now
             ),
         )
         self.assertEqual(
@@ -88,7 +89,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         self.assertEqual(
             (200, self.answer(self.last_week)),
             endpoints.public_key_response_at(
-                self.schedule, "pkcs", io.minutes_since_base(asked), self.now
+                self.schedule, "spki", io.minutes_since_base(asked), self.now
             ),
         )
 
@@ -99,7 +100,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
             self.assertEqual(
                 (200, self.answer(self.this_week)),
                 endpoints.public_key_response_at(
-                    self.schedule, "pkcs", absent, self.now
+                    self.schedule, "spki", absent, self.now
                 ),
             )
 
@@ -110,7 +111,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         self.assertEqual(
             (200, self.answer(self.this_week)),
             endpoints.public_key_response_at(
-                self.schedule, "pkcs", self.minutes(future), self.now
+                self.schedule, "spki", self.minutes(future), self.now
             ),
         )
 
@@ -121,7 +122,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         self.assertEqual(
             (200, self.answer(self.this_week)),
             endpoints.public_key_response_at(
-                self.schedule, "pkcs", str(0xFFFFFFFF), self.now
+                self.schedule, "spki", str(0xFFFFFFFF), self.now
             ),
         )
 
@@ -130,13 +131,13 @@ class PublicKeyResponseAtTests(unittest.TestCase):
         self.assertEqual(
             (404, ""),
             endpoints.public_key_response_at(
-                self.schedule, "pkcs", self.minutes(before), self.now
+                self.schedule, "spki", self.minutes(before), self.now
             ),
         )
         self.assertEqual(
             (404, ""),
             endpoints.public_key_response_at(
-                PublicKeySchedule([]), "pkcs", None, self.now
+                PublicKeySchedule([]), "spki", None, self.now
             ),
         )
 
@@ -146,48 +147,65 @@ class PublicKeyResponseAtTests(unittest.TestCase):
                 self.assertEqual(
                     (400, ""),
                     endpoints.public_key_response_at(
-                        self.schedule, "pkcs", malformed, self.now
+                        self.schedule, "spki", malformed, self.now
                     ),
                 )
         self.assertEqual(
             (400, ""),
-            endpoints.public_key_response_at(self.schedule, "pkcs", -1, self.now),
+            endpoints.public_key_response_at(self.schedule, "spki", -1, self.now),
         )
         self.assertEqual(
             (400, ""),
-            endpoints.public_key_response_at(self.schedule, "pkcs", True, self.now),
+            endpoints.public_key_response_at(self.schedule, "spki", True, self.now),
         )
 
-    def test_the_format_must_be_spki_or_pkcs(self) -> None:
-        with self.assertRaises(OwidError):
-            endpoints.public_key_response_at(self.schedule, "der", None, self.now)
+    def test_the_format_is_spki_and_any_other_is_400(self) -> None:
+        """The format parameter names the encoding of the key in the answer.
+        The one encoding defined is answered whether or not it is asked for
+        by name, the answer echoes it, and any other is refused as a bad
+        request rather than answered in an encoding the caller did not ask
+        for."""
+        for fmt in ("spki", None):
+            status, body = endpoints.public_key_response_at(
+                self.schedule, fmt, None, self.now
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("spki", json.loads(body)["format"])
+        for refused in ("pkcs", "der", ""):
+            with self.subTest(format=refused):
+                self.assertEqual(
+                    (400, ""),
+                    endpoints.public_key_response_at(
+                        self.schedule, refused, None, self.now
+                    ),
+                )
 
     def test_the_moment_of_the_request_defaults_to_now(self) -> None:
         """Without a moment supplied the clock is used, so the answer is the
         latest key that has started by the time the test runs."""
-        status, body = endpoints.public_key_response_at(self.schedule, "pkcs", None)
+        status, body = endpoints.public_key_response_at(self.schedule, "spki", None)
         self.assertEqual(200, status)
         self.assertIn("BEGIN PUBLIC KEY", body)
         started = [
             key for key in self.schedule.keys
             if key.starts_at <= datetime.now(timezone.utc)
         ]
-        self.assertEqual(started[-1].public_key_pem, json.loads(body)["publicKeySPKI"])
+        self.assertEqual(started[-1].public_key_pem, json.loads(body)["publicKey"])
 
     def test_the_answer_states_the_span_and_is_checked_before_it_is_sent(self) -> None:
         """The answer carries the moments the key is valid from and to, the
         last key of the schedule has no end, and an answer a client would
         refuse is refused by the creator first."""
         status, body = endpoints.public_key_response_at(
-            self.schedule, "pkcs", self.minutes(self.now), self.now
+            self.schedule, "spki", self.minutes(self.now), self.now
         )
         self.assertEqual(200, status)
         answer = json.loads(body)
-        self.assertEqual(self.this_week.public_key_pem, answer["publicKeySPKI"])
+        self.assertEqual(self.this_week.public_key_pem, answer["publicKey"])
         self.assertEqual("2026-08-31T00:00:00Z", answer["validFrom"])
         self.assertEqual("2026-09-07T00:00:00Z", answer["validTo"])
         status, body = endpoints.public_key_response_at(
-            self.schedule, "pkcs", None, datetime(2026, 9, 10, tzinfo=timezone.utc)
+            self.schedule, "spki", None, datetime(2026, 9, 10, tzinfo=timezone.utc)
         )
         self.assertIsNone(json.loads(body)["validTo"], "the last key has no end")
         with self.assertRaises(OwidError):
@@ -206,7 +224,7 @@ class PublicKeyResponseAtTests(unittest.TestCase):
             )
         with self.assertRaises(OwidError):
             endpoints.validate_public_key_answer(
-                {"publicKeySPKI": self.this_week.public_key_pem, "validFrom": None,
+                {"publicKey": self.this_week.public_key_pem, "validFrom": None,
                  "validTo": "2026-09-07T00:00:00Z"},
                 None,
             )

@@ -148,7 +148,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         value the end point selects a key by, and it names the well known
         path from the specification."""
         self.assertEqual(
-            "https://51d.es/owid/api/v3/public-key?date={0}&format=pkcs".format(
+            "https://51d.es/owid/api/v3/public-key?date={0}&format=spki".format(
                 key_fixtures.IDENTIFIER_MINUTES
             ),
             public_key_fetch.public_key_url(key_fixtures.identifier(), "https"),
@@ -162,7 +162,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         version2 = crafted(Version.VERSION2, "example.com", IDENTIFIER_DATE)
         self.assertIs(Version.VERSION2, version2.version)
         self.assertEqual(
-            "https://example.com/owid/api/v2/public-key?date={0}&format=pkcs"
+            "https://example.com/owid/api/v2/public-key?date={0}&format=spki"
             .format(key_fixtures.IDENTIFIER_MINUTES),
             public_key_fetch.public_key_url(version2, "https"),
             "should ask the version 2 end point",
@@ -172,7 +172,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         creator = Creator("example.com", Crypto.new())
         owid = creator.create_string("payload")
         self.assertEqual(
-            "https://example.com/owid/api/v3/public-key?date={0}&format=pkcs"
+            "https://example.com/owid/api/v3/public-key?date={0}&format=spki"
             .format(io.minutes_since_base(owid.date)),
             public_key_fetch.public_key_url(owid, "https"),
             "should name the minute the OWID was signed",
@@ -212,7 +212,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         identifier as a forgery."""
         owid = key_fixtures.identifier()
         end_point = self.end_point()
-        undated = end_point.base + "/owid/api/v3/public-key?format=pkcs"
+        undated = end_point.base + "/owid/api/v3/public-key?format=spki"
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch._signature_status_at_url(
@@ -234,7 +234,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         # A fortnight before the schedule begins, which no key in it covers,
         # so the end point answers 404 the way the cloud does.
         before = key_fixtures.scheduled_keys()[0].starts_at - timedelta(days=14)
-        url = "{0}/owid/api/v3/public-key?date={1}&format=pkcs".format(
+        url = "{0}/owid/api/v3/public-key?date={1}&format=spki".format(
             end_point.base, io.minutes_since_base(before)
         )
         self.assertIs(
@@ -248,7 +248,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """The refusal carries the code and the domain, not only a message."""
         end_point = self.end_point()
-        url = end_point.base + "/owid/api/v3/public-key?date=0&format=pkcs"
+        url = end_point.base + "/owid/api/v3/public-key?date=0&format=spki"
         with self.assertRaises(PublicKeyFetchError) as refused:
             await public_key_fetch._public_key_pem_at_url(url, "51d.es")
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
@@ -260,7 +260,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         400, as the cloud does, and the package reports the refusal as a key
         that could not be obtained."""
         end_point = self.end_point()
-        url = end_point.base + "/owid/api/v3/public-key?date=abc&format=pkcs"
+        url = end_point.base + "/owid/api/v3/public-key?date=abc&format=spki"
         with self.assertRaises(PublicKeyFetchError) as refused:
             await public_key_fetch._public_key_pem_at_url(url, "51d.es")
         self.assertIs(SignatureStatus.KEY_UNAVAILABLE, refused.exception.status)
@@ -531,7 +531,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         await self._pem_at(end_point, recent)
         await self._pem_at(end_point, now + timedelta(days=7))
         await public_key_fetch._public_key_pem_at_url(
-            end_point.base + "/owid/api/v3/public-key?format=pkcs",
+            end_point.base + "/owid/api/v3/public-key?format=spki",
             key_fixtures.IDENTIFIER_DOMAIN,
         )
         old = now - timedelta(
@@ -628,10 +628,10 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
             requests.append(url)
             date = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query)).get("date")
-            status, body = endpoints.public_key_response_at(schedule, "pkcs", date)
+            status, body = endpoints.public_key_response_at(schedule, "spki", date)
             return status, body.encode("utf-8")
 
-        url = "https://creator.test/owid/api/v3/public-key?date={0}&format=pkcs"
+        url = "https://creator.test/owid/api/v3/public-key?date={0}&format=spki"
 
         async def status_of(owid: Owid) -> SignatureStatus:
             return await public_key_fetch._signature_status_at_url(
@@ -764,7 +764,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         async def contradictory(url: str, timeout: float) -> Tuple[int, bytes]:
             return 200, json.dumps(
                 {
-                    "publicKeySPKI": key_fixtures.schedule().keys[0].public_key_pem,
+                    "publicKey": key_fixtures.schedule().keys[0].public_key_pem,
                     "validFrom": "2026-08-31T00:00:00Z",
                     "validTo": "2026-08-24T00:00:00Z",
                 }
@@ -775,6 +775,38 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             await public_key_fetch._signature_status_at_url(
                 owid, end_point.url_for(owid), None, contradictory
             ),
+        )
+
+    async def test_an_answer_in_another_format_is_a_key_that_cannot_be_read(self) -> None:
+        """The request asks for the spki format by name, and an answer that
+        states another format is a key this package cannot read rather than
+        one it guesses at. An answer that states no format is read as spki,
+        which is the value a request without the parameter receives."""
+        owid = key_fixtures.identifier()
+        pem = key_fixtures.schedule().key_for(owid).public_key_pem
+        formats: List[Optional[str]] = []
+
+        async def creator(url: str, timeout: float) -> Tuple[int, bytes]:
+            query = urllib.parse.urlsplit(url).query
+            formats.append(dict(urllib.parse.parse_qsl(query)).get("format"))
+            return 200, json.dumps(
+                {"format": "pkcs", "publicKey": pem, "validFrom": None, "validTo": None}
+            ).encode("utf-8")
+
+        self.assertIs(
+            SignatureStatus.INVALID_KEY,
+            await public_key_fetch.signature_status(owid, "https", ALONE, creator),
+        )
+        self.assertEqual(["spki"], formats, "the request asks for spki by name")
+
+        async def unstated(url: str, timeout: float) -> Tuple[int, bytes]:
+            return 200, json.dumps(
+                {"publicKey": pem, "validFrom": None, "validTo": None}
+            ).encode("utf-8")
+
+        self.assertIs(
+            SignatureStatus.SIGNATURE_VALID,
+            await public_key_fetch.signature_status(owid, "https", ALONE, unstated),
         )
 
     def test_many_threads_verifying_one_owid_together_make_one_request(self) -> None:
