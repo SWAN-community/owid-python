@@ -461,10 +461,8 @@ opaque crypto error.
 
 `endpoints`
 
-- `creator_path(version)` and `public_key_path(version)` return the well known
-  paths.
-- `creator_response(creator, name, contract_url)` returns the creator JSON
-  with the `domain`, `name`, `publicKeySPKI`, and `contractURL` fields.
+- `public_key_path(version)` returns the well known path of the public key end
+  point.
 - `public_key_response(creator, format)` returns the JSON body of the public
   key end point for a creator with one key, the key as `publicKeySPKI` with
   `validFrom` and `validTo` null. `public_key_response_at` states both moments

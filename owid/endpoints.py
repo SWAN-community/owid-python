@@ -17,9 +17,7 @@
 specification.
 
 These are framework agnostic. They return the path and body so that any HTTP
-server can serve them. The mandatory end points are the creator end point at
-/owid/api/v{version}/creator returning JSON with the domain, common name, and
-public key of the creator, and the public key end point at
+server can serve them. The mandatory end point is the public key end point at
 /owid/api/v{version}/public-key returning the public key as a JSON object.
 The format query parameter must be spki or pkcs.
 
@@ -47,31 +45,10 @@ from .public_key_schedule import PublicKeySchedule
 from .version import Version
 
 
-def creator_path(version: Version) -> str:
-    """Returns the path of the creator end point for the version provided. For
-    example /owid/api/v3/creator."""
-    return "/owid/api/v{0}/creator".format(version.as_byte())
-
-
 def public_key_path(version: Version) -> str:
     """Returns the path of the public key end point for the version provided.
     For example /owid/api/v3/public-key."""
     return "/owid/api/v{0}/public-key".format(version.as_byte())
-
-
-def creator_response(creator: Creator, name: str, contract_url: str = "") -> str:
-    """Returns the JSON body for the creator end point.
-
-    The body contains the domain, name, public key in SPKI form, and the
-    contract URL.
-    """
-    body = {
-        "domain": creator.domain,
-        "name": name,
-        "publicKeySPKI": creator.crypto.subject_public_key_info(),
-        "contractURL": contract_url,
-    }
-    return json.dumps(body)
 
 
 def public_key_response(creator: Creator, format: str) -> str:

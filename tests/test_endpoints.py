@@ -30,32 +30,9 @@ def _new_creator() -> Creator:
 class EndpointTests(unittest.TestCase):
     def test_paths(self) -> None:
         self.assertEqual(
-            endpoints.creator_path(Version.VERSION3), "/owid/api/v3/creator"
-        )
-        self.assertEqual(
             endpoints.public_key_path(Version.VERSION3),
             "/owid/api/v3/public-key",
         )
-
-    def test_creator_response_fields(self) -> None:
-        creator = _new_creator()
-        body = endpoints.creator_response(
-            creator, "Example Org", "https://example.com/contract"
-        )
-        parsed = json.loads(body)
-        self.assertEqual(parsed["domain"], "example.com")
-        self.assertEqual(parsed["name"], "Example Org")
-        self.assertEqual(parsed["contractURL"], "https://example.com/contract")
-        self.assertIn("BEGIN PUBLIC KEY", parsed["publicKeySPKI"])
-        # The JSON field names must match the specification.
-        self.assertIn("publicKeySPKI", body)
-        self.assertIn("contractURL", body)
-
-    def test_creator_response_default_contract_url(self) -> None:
-        creator = _new_creator()
-        body = endpoints.creator_response(creator, "Example Org")
-        parsed = json.loads(body)
-        self.assertEqual(parsed["contractURL"], "")
 
     def test_public_key_response_formats(self) -> None:
         creator = _new_creator()
