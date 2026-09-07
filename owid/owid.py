@@ -15,17 +15,16 @@
 # ****************************************************************************
 """The OWID structure and the reading, writing, and verification it provides.
 
-An OWID records that the processor operating a domain handled the payload, and
-any other OWIDs covered by the signature, at the date and time given. Once
-signed it is immutable. Any change to the fields will cause verification to
-fail.
+An OWID records that the processor operating a domain handled the payload at
+the date and time given. Once signed it is immutable. Any change to the fields
+will cause verification to fail.
 """
 
 from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Optional
 
 from . import io
 from .crypto import Crypto
@@ -117,7 +116,8 @@ class Owid:
 
     @property
     def signature(self) -> bytes:
-        """Signature for this OWID and any others provided when signing."""
+        """Signature over the fields of this OWID without the signature
+        field."""
         return self._signature
 
     @classmethod
@@ -242,16 +242,11 @@ class Owid:
         io.write_date(buffer, self.date, self.version)
         io.write_byte_array(buffer, self.payload)
 
-    def data_for_crypto(self, others: Sequence["Owid"]) -> bytes:
-        """Builds the byte array used for signing and verification.
-
-        Contains the fields of this OWID without the signature, followed by
-        the complete byte form of each of the others in the order provided.
-        """
+    def signed_bytes(self) -> bytes:
+        """The bytes the signature covers, being the fields of this OWID
+        without the signature field and nothing else."""
         buffer = bytearray()
         self._to_buffer_no_signature(buffer)
-        for other in others:
-            other.to_buffer(buffer)
         return bytes(buffer)
 
     def payload_as_string(self) -> str:
@@ -273,30 +268,17 @@ class Owid:
         delta = datetime.now(timezone.utc) - self.date
         return int(delta.total_seconds() // 60)
 
-    def verify_with_crypto(
-        self, crypto: Crypto, others: Optional[Sequence["Owid"]] = None
-    ) -> bool:
-        """Verifies this OWID, and any others that were included when it was
-        signed, using the crypto instance provided.
+    def verify_with_crypto(self, crypto: Crypto) -> bool:
+        """Verifies this OWID using the crypto instance provided."""
+        return crypto.verify_byte_array(self.signed_bytes(), self.signature)
 
-        Pass an empty sequence for others when the OWID was signed on its own.
-        """
-        if others is None:
-            others = []
-        data = self.data_for_crypto(others)
-        return crypto.verify_byte_array(data, self.signature)
-
-    def verify_with_public_key(
-        self, public_pem: str, others: Optional[Sequence["Owid"]] = None
-    ) -> bool:
-        """Verifies this OWID, and any others that were included when it was
-        signed, using the public key in SPKI PEM form provided."""
+    def verify_with_public_key(self, public_pem: str) -> bool:
+        """Verifies this OWID using the public key in SPKI PEM form
+        provided."""
         crypto = Crypto.new_verify_only(public_pem)
-        return self.verify_with_crypto(crypto, others)
+        return self.verify_with_crypto(crypto)
 
-    def signature_status(
-        self, public_pem: str, others: Optional[Sequence["Owid"]] = None
-    ) -> "SignatureStatus":
+    def signature_status(self, public_pem: str) -> "SignatureStatus":
         """Says whether the signature is genuine, or why that could not be
         decided.
 
@@ -320,8 +302,7 @@ class Owid:
             # The key is the thing at fault, not the identifier.
             return SignatureStatus.INVALID_KEY
         try:
-            data = self.data_for_crypto(others if others is not None else [])
-            matched = crypto.verify_byte_array(data, self._signature)
+            matched = crypto.verify_byte_array(self.signed_bytes(), self._signature)
         except Exception:
             # The provider failed on inputs that were themselves fine.
             return SignatureStatus.VERIFICATION_ERROR

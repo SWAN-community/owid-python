@@ -84,7 +84,7 @@ class PayloadLengthTests(unittest.TestCase):
         parsed = Owid._from_byte_array_or_raise(original.as_byte_array())
         self.assertEqual(parsed.payload, PAYLOAD)
         self.assertEqual(parsed, original)
-        self.assertTrue(parsed.verify_with_crypto(crypto, []))
+        self.assertTrue(parsed.verify_with_crypto(crypto))
 
     def test_declared_length_off_by_one_is_refused(self) -> None:
         """One more or one fewer than the bytes present is refused, because

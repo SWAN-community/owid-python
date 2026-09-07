@@ -9,9 +9,8 @@ Python.
 
 An Open Web Id (OWID) records that the entity operating a domain captured or
 generated a payload at a date and time, together with an ECDSA signature over
-the OWID and any other OWIDs it was signed with. OWIDs chain together to form
-verifiable trees. The curve is NIST P-256 (also known as secp256r1 or
-prime256v1) and the hash is SHA-256.
+the OWID. The curve is NIST P-256 (also known as secp256r1 or prime256v1) and
+the hash is SHA-256.
 
 Read the [OWID project](https://github.com/SWAN-community/owid) to learn more
 about the concepts before looking into this implementation. This package
@@ -120,22 +119,11 @@ encoded = owid.as_base64()
 result = Owid.parse(encoded)
 if result:
     public_pem = crypto.public_key_pem()
-    assert result.owid.verify_with_public_key(public_pem, [])
+    assert result.owid.verify_with_public_key(public_pem)
 else:
     # result.status names which of the expected problems it was, for example
     # ParseStatus.INVALID_BASE64 or ParseStatus.BYTE_COUNT_MISMATCH.
     reason = result.status.value
-```
-
-OWIDs chain together. Create one that covers others, and pass the same others,
-in the same order, when verifying.
-
-```python
-root = creator.create_string("root")
-party = creator.create(b"party", [root])
-
-assert party.verify_with_crypto(crypto, [root])
-assert not party.verify_with_crypto(crypto, [])
 ```
 
 Where the difference between a signature that does not match and a check that
@@ -418,10 +406,9 @@ a separate answer.
 - `payload_as_string()` decodes the payload as UTF-8, replacing invalid bytes.
 - `payload_as_printable()` returns the payload as lower case hexadecimal.
 - `payload_as_base64()` returns the payload as a base 64 string.
-- `verify_with_crypto(crypto, others)` and
-  `verify_with_public_key(public_pem, others)` return True if the signature is
-  valid. Pass an empty list for `others` when the OWID was signed on its own.
-- `signature_status(public_pem, others)` answers the same question with a
+- `verify_with_crypto(crypto)` and `verify_with_public_key(public_pem)` return
+  True if the signature is valid.
+- `signature_status(public_pem)` answers the same question with a
   `SignatureStatus`, which keeps a signature that does not match apart from a
   check that could not be made at all.
 - `age_minutes()` returns the whole minutes elapsed since creation.
@@ -456,8 +443,7 @@ opaque crypto error.
 - `Creator(domain, crypto)` binds a domain to a signing crypto instance.
 - `from_configuration(configuration)` builds a creator from a domain and a
   private key PEM.
-- `create(value, others)` creates and signs a new OWID carrying the bytes,
-  covering any others with the same signature.
+- `create(value)` creates and signs a new OWID carrying the bytes.
 - `create_string(value)` does the same with the UTF-8 bytes of a string.
 
 `endpoints`
@@ -486,7 +472,7 @@ opaque crypto error.
 - `await public_key_pem(owid, scheme, transport=None)` returns the key,
   raising `PublicKeyFetchError`, which carries the status to report, the
   domain and the response code.
-- `await signature_status(owid, scheme, others=None, transport=None)` answers
+- `await signature_status(owid, scheme, transport=None)` answers
   with the status, so a key that could not be fetched is `KEY_UNAVAILABLE`,
   as is one the creator says was not in force at the identifier's date, one
   that could not be read is `INVALID_KEY`, and none of these is mistaken for
@@ -503,7 +489,7 @@ opaque crypto error.
   schedule does not reach back that far.
 - `current()` returns the key in force now, and `last()` the key with the
   latest start, which for a schedule published ahead of time is usually a
-  key that has not begun. `signature_status(owid, others=None)` chooses the
+  key that has not begun. `signature_status(owid)` chooses the
   key and answers with the status, and `verify` answers True only for
   `SIGNATURE_VALID`.
 - `DatedPublicKey(starts_at, public_key_pem)` is one key and the date the key
@@ -530,9 +516,7 @@ minutes. The base date is 2020-01-01T00:00:00 UTC.
 The signature is the 64 byte concatenation of the 32 byte big endian r value
 and the 32 byte big endian s value (IEEE P1363 format), not the ASN.1 DER form
 that most libraries produce by default. The data covered by the signature is
-this OWID without its signature, followed by the complete bytes, including the
-signature, of each other OWID in the order given. The same others in the same
-order must be supplied to verify as were supplied to sign.
+this OWID without its signature field and nothing else.
 
 A single byte with value 0 is the marker for an absent optional OWID inside a
 larger byte array, written by `Owid.empty_to_buffer` and reported by both reads

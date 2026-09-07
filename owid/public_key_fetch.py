@@ -68,7 +68,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from . import endpoints, io
 from .endpoints import validate_public_key_answer
@@ -262,39 +262,35 @@ async def public_key_pem(
 async def signature_status(
     owid: Owid,
     scheme: str,
-    others: Optional[Sequence[Owid]] = None,
     transport: Optional[Transport] = None,
 ) -> SignatureStatus:
     """Says whether the signature on the OWID is genuine, fetching the key
     that was in force when the OWID was signed from the creator domain.
 
-    A key that cannot be fetched is SignatureStatus.KEY_UNAVAILABLE and one
-    that arrives in a form this package cannot read is
-    SignatureStatus.INVALID_KEY. Neither is SignatureStatus.SIGNATURE_INVALID,
-    because an outage or a badly served key leaves the signature unjudged, and
-    reporting either as invalid would read as an attack.
-
-    Pass the other OWIDs that were signed together with this one, in the same
-    order as when signed, or nothing when it was signed on its own.
+    A key that cannot be fetched is SignatureStatus.KEY_UNAVAILABLE, as is
+    one the creator says was not in force at the OWID's date, and one that
+    arrives in a form this package cannot read is SignatureStatus.INVALID_KEY.
+    None of these is SignatureStatus.SIGNATURE_INVALID, because an outage or a
+    badly served key leaves the signature unjudged, and reporting either as
+    invalid would read as an attack.
     """
     try:
         url = public_key_url(owid, scheme)
     except OwidError:
         return SignatureStatus.KEY_UNAVAILABLE
-    return await _signature_status_at_url(owid, url, others, transport)
+    return await _signature_status_at_url(owid, url, transport)
 
 
 async def verify(
     owid: Owid,
     scheme: str,
-    others: Optional[Sequence[Owid]] = None,
     transport: Optional[Transport] = None,
 ) -> bool:
     """Returns True only when the signature verifies under the key the
     creator served for the date the OWID carries. Every other outcome, a
     signature that does not match included, is False, so ask
     signature_status where the difference changes what the caller does."""
-    status = await signature_status(owid, scheme, others, transport)
+    status = await signature_status(owid, scheme, transport)
     return status is SignatureStatus.SIGNATURE_VALID
 
 
@@ -321,7 +317,6 @@ def _cached_key_count() -> int:
 async def _signature_status_at_url(
     owid: Owid,
     url: str,
-    others: Optional[Sequence[Owid]] = None,
     transport: Optional[Transport] = None,
 ) -> SignatureStatus:
     """The work signature_status does once the URL is known, kept apart so
@@ -341,13 +336,13 @@ async def _signature_status_at_url(
         return failed.status
     except OwidError:
         return SignatureStatus.KEY_UNAVAILABLE
-    status = owid.signature_status(answer.pem, others)
+    status = owid.signature_status(answer.pem)
     if status is not SignatureStatus.SIGNATURE_INVALID:
         return status
     minute = io.minutes_since_base(owid.date)
     if minute < 0:
         return status
-    if await _neighbour_verifies(owid, minute, url, answer, others, transport):
+    if await _neighbour_verifies(owid, minute, url, answer, transport):
         return SignatureStatus.SIGNATURE_VALID
     if answer.known and not answer.covers(minute):
         return SignatureStatus.KEY_UNAVAILABLE
@@ -359,7 +354,6 @@ async def _neighbour_verifies(
     minute: int,
     url: str,
     tried: _KeyAnswer,
-    others: Optional[Sequence[Owid]],
     transport: Optional[Transport],
 ) -> bool:
     """Whether a key neighbouring the one the OWID's own minute selected
@@ -399,7 +393,7 @@ async def _neighbour_verifies(
             continue
         if neighbour.pem == tried.pem:
             continue
-        if owid.signature_status(neighbour.pem, others) is SignatureStatus.SIGNATURE_VALID:
+        if owid.signature_status(neighbour.pem) is SignatureStatus.SIGNATURE_VALID:
             return True
     return False
 

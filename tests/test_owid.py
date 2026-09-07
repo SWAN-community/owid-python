@@ -81,9 +81,8 @@ class CanonicalWireVectorTests(unittest.TestCase):
 class CrossLanguageFixtureTests(unittest.TestCase):
     """Real signatures produced by other implementations must verify.
 
-    For each language the simple and utf8 OWIDs verify on their own, the chain
-    root verifies on its own, and the chain party verifies only when the chain
-    root is supplied as the single other. A tampered copy must fail.
+    For each language the simple and utf8 OWIDs verify, and a tampered copy
+    must fail.
     """
 
     def test_simple_and_utf8_verify(self) -> None:
@@ -92,7 +91,7 @@ class CrossLanguageFixtureTests(unittest.TestCase):
             with self.subTest(language=name, fixture="simple"):
                 simple = _parsed(Owid.parse(data["simple"]))
                 self.assertEqual(simple.payload_as_string(), "example")
-                self.assertTrue(simple.verify_with_public_key(spki, []))
+                self.assertTrue(simple.verify_with_public_key(spki))
             with self.subTest(language=name, fixture="utf8"):
                 utf8 = _parsed(Owid.parse(data["utf8"]))
                 self.assertEqual(
@@ -100,52 +99,20 @@ class CrossLanguageFixtureTests(unittest.TestCase):
                     fixtures.UTF8_PAYLOAD,
                     "the UTF-8 payload must decode to the expected text",
                 )
-                self.assertTrue(utf8.verify_with_public_key(spki, []))
-
-    def test_chain_verifies_with_root_as_other(self) -> None:
-        for name, data in fixtures.ALL_LANGUAGES:
-            spki = data["spki"]
-            root = _parsed(Owid.parse(data["chain_root"]))
-            party = _parsed(Owid.parse(data["chain_party"]))
-            with self.subTest(language=name):
-                self.assertEqual(root.payload_as_string(), "root")
-                self.assertEqual(party.payload_as_string(), "party")
-                # Root verifies on its own.
-                self.assertTrue(root.verify_with_public_key(spki, []))
-                # Party verifies only with the root supplied as the other.
-                self.assertTrue(party.verify_with_public_key(spki, [root]))
-
-    def test_chain_party_fails_without_others(self) -> None:
-        for name, data in fixtures.ALL_LANGUAGES:
-            spki = data["spki"]
-            party = _parsed(Owid.parse(data["chain_party"]))
-            with self.subTest(language=name):
-                self.assertFalse(
-                    party.verify_with_public_key(spki, []),
-                    "the chain party must not verify without the root",
-                )
+                self.assertTrue(utf8.verify_with_public_key(spki))
 
     def test_tampered_fixtures_fail(self) -> None:
         for name, data in fixtures.ALL_LANGUAGES:
             spki = data["spki"]
-            root = _parsed(Owid.parse(data["chain_root"]))
-            for fixture in ("simple", "utf8", "chain_root"):
+            for fixture in ("simple", "utf8"):
                 with self.subTest(language=name, fixture=fixture):
                     tampered = _parsed(Owid.parse(
                         fixtures.flip_last_byte(data[fixture]))
                     )
                     self.assertFalse(
-                        tampered.verify_with_public_key(spki, []),
+                        tampered.verify_with_public_key(spki),
                         "a flipped signature byte must fail to verify",
                     )
-            with self.subTest(language=name, fixture="chain_party"):
-                tampered_party = _parsed(Owid.parse(
-                    fixtures.flip_last_byte(data["chain_party"]))
-                )
-                self.assertFalse(
-                    tampered_party.verify_with_public_key(spki, [root]),
-                    "a flipped signature byte must fail to verify",
-                )
 
 
 class SignAndSelfVerifyTests(unittest.TestCase):
@@ -158,12 +125,12 @@ class SignAndSelfVerifyTests(unittest.TestCase):
         creator = Creator("example.com", crypto)
         owid = creator.create_string("Hello World")
         # Verifies with the crypto instance and with the exported public key.
-        self.assertTrue(owid.verify_with_crypto(crypto, []))
-        self.assertTrue(owid.verify_with_public_key(crypto.public_key_pem(), []))
+        self.assertTrue(owid.verify_with_crypto(crypto))
+        self.assertTrue(owid.verify_with_public_key(crypto.public_key_pem()))
         # A copy decoded from base 64 also verifies.
         copy = _parsed(Owid.parse(owid.as_base64()))
         self.assertEqual(copy, owid)
-        self.assertTrue(copy.verify_with_crypto(crypto, []))
+        self.assertTrue(copy.verify_with_crypto(crypto))
 
     def test_tampered_self_signed_fails(self) -> None:
         from owid import Creator
@@ -181,21 +148,7 @@ class SignAndSelfVerifyTests(unittest.TestCase):
         raw[at] ^= 0xFF
         result = Owid.parse_bytes(bytes(raw))
         self.assertTrue(result.ok, result.status)
-        self.assertFalse(result.owid.verify_with_crypto(crypto, []))
-
-    def test_sign_with_others_round_trip(self) -> None:
-        from owid import Creator
-
-        crypto = Crypto.new()
-        creator = Creator("example.com", crypto)
-        root = creator.create_string("root")
-        # Created with the root as the other it is signed alongside, rather
-        # than assembled and then signed, because a caller no longer makes an
-        # OWID and hands it over to have a signature put on it.
-        party = creator.create(b"party", [root])
-        # Party verifies with the root as the single other, and fails alone.
-        self.assertTrue(party.verify_with_crypto(crypto, [root]))
-        self.assertFalse(party.verify_with_crypto(crypto, []))
+        self.assertFalse(result.owid.verify_with_crypto(crypto))
 
 
 class PayloadAndSerializationTests(unittest.TestCase):

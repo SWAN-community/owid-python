@@ -37,7 +37,7 @@ was never examined.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Tuple
 
 from .error import OwidError
 from .owid import Owid
@@ -182,9 +182,7 @@ class PublicKeySchedule:
             return None
         return self.key_in_force(owid.date)
 
-    def signature_status(
-        self, owid: Optional[Owid], others: Optional[Sequence[Owid]] = None
-    ) -> SignatureStatus:
+    def signature_status(self, owid: Optional[Owid]) -> SignatureStatus:
         """Says whether the signature on the OWID is genuine, using the key
         that was in force when the OWID was signed. The answer is
         SignatureStatus.KEY_UNAVAILABLE where the schedule holds no key for
@@ -194,12 +192,10 @@ class PublicKeySchedule:
         key = self.key_for(owid)
         if key is None:
             return SignatureStatus.KEY_UNAVAILABLE
-        return owid.signature_status(key.public_key_pem, others)
+        return owid.signature_status(key.public_key_pem)
 
-    def verify(
-        self, owid: Optional[Owid], others: Optional[Sequence[Owid]] = None
-    ) -> bool:
+    def verify(self, owid: Optional[Owid]) -> bool:
         """Returns True only when the signature verifies under the key in
         force when the OWID was signed."""
-        status = self.signature_status(owid, others)
+        status = self.signature_status(owid)
         return status is SignatureStatus.SIGNATURE_VALID

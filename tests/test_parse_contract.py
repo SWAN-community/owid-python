@@ -158,7 +158,7 @@ class ParsingIsNotVerificationTests(unittest.TestCase):
             "flipping a signature byte leaves the envelope readable")
         self.assertEqual(ParseStatus.PARSED, result.status)
         self.assertFalse(
-            result.owid.verify_with_crypto(crypto, []),
+            result.owid.verify_with_crypto(crypto),
             "and the signature is then found not to match")
 
     def test_no_verification_happens_during_a_failed_parse(self) -> None:
@@ -281,7 +281,7 @@ class SignatureStatusTests(unittest.TestCase):
         owid = Creator("example.com", crypto).create(b"abc")
         self.assertEqual(
             SignatureStatus.SIGNATURE_VALID,
-            owid.signature_status(crypto.public_key_pem(), []))
+            owid.signature_status(crypto.public_key_pem()))
 
     def test_invalid_only_when_it_really_does_not_match(self) -> None:
         crypto = Crypto.new()
@@ -291,13 +291,13 @@ class SignatureStatusTests(unittest.TestCase):
         tampered = Owid.parse_bytes(bytes(raw)).owid
         self.assertEqual(
             SignatureStatus.SIGNATURE_INVALID,
-            tampered.signature_status(crypto.public_key_pem(), []))
+            tampered.signature_status(crypto.public_key_pem()))
 
     def test_no_key_is_not_a_forgery(self) -> None:
         crypto = Crypto.new()
         owid = Creator("example.com", crypto).create(b"abc")
         self.assertEqual(
-            SignatureStatus.KEY_UNAVAILABLE, owid.signature_status("", []))
+            SignatureStatus.KEY_UNAVAILABLE, owid.signature_status(""))
 
     def test_unreadable_key_is_not_a_forgery(self) -> None:
         """This is the case that happened. The key endpoints served PEM a
@@ -309,7 +309,7 @@ class SignatureStatusTests(unittest.TestCase):
             SignatureStatus.INVALID_KEY,
             owid.signature_status(
                 "-----BEGIN PUBLIC KEY-----\nnot base 64\n"
-                "-----END PUBLIC KEY-----", []))
+                "-----END PUBLIC KEY-----"))
 
     def test_remaining_members_are_unreachable_here(self) -> None:
         """INVALID_SIGNATURE_LENGTH cannot be reached from a parsed OWID,

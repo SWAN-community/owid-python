@@ -59,9 +59,6 @@ from owid import (
 from tests import key_fixtures
 from tests.key_end_point import Answer, KeyEndPoint
 
-#: No other OWIDs were covered by the signature on the fixture.
-ALONE: List[Owid] = []
-
 #: The date the fixture identifier carries, which the cloud trims to the day.
 IDENTIFIER_DATE = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
@@ -189,7 +186,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
             await public_key_fetch._signature_status_at_url(
-                owid, end_point.url_for(owid), ALONE
+                owid, end_point.url_for(owid)
             ),
             "should verify against the key in force when it was signed",
         )
@@ -216,7 +213,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch._signature_status_at_url(
-                owid, undated, ALONE
+                owid, undated
             ),
             "an undated request gets the key in force at the request, which "
             "the creator says was not in force when the identifier was signed",
@@ -239,7 +236,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url),
             "no key means the signature was never examined",
         )
 
@@ -281,7 +278,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(end_point.stop)
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url),
             "a connection that is refused leaves the signature unjudged",
         )
 
@@ -303,7 +300,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch._signature_status_at_url(
-                owid, end_point.url_for(owid), ALONE
+                owid, end_point.url_for(owid)
             ),
         )
 
@@ -315,7 +312,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.INVALID_KEY,
             await public_key_fetch._signature_status_at_url(
-                owid, end_point.url_for(owid), ALONE
+                owid, end_point.url_for(owid)
             ),
         )
 
@@ -600,7 +597,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         owid = Owid._create(
             version=Version.VERSION3, domain=domain, date=moment, payload=b"payload"
         )
-        owid._signature = crypto.sign_byte_array(owid.data_for_crypto([]))
+        owid._signature = crypto.sign_byte_array(owid.signed_bytes())
         return owid
 
     async def test_a_signature_failing_near_the_edge_of_a_span_is_checked_against_the_neighbour(
@@ -635,7 +632,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
 
         async def status_of(owid: Owid) -> SignatureStatus:
             return await public_key_fetch._signature_status_at_url(
-                owid, url.format(io.minutes_since_base(owid.date)), None, creator
+                owid, url.format(io.minutes_since_base(owid.date)), creator
             )
 
         late = self._signed_at("creator.test", rotation + timedelta(minutes=5), first)
@@ -680,7 +677,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         late = self._signed_at("creator.test", rotation + timedelta(minutes=5), first)
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            await public_key_fetch.signature_status(late, "https", ALONE, creator),
+            await public_key_fetch.signature_status(late, "https", creator),
         )
         minute = io.minutes_since_base(rotation)
         self.assertEqual(
@@ -711,7 +708,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         live = self._signed_at("creator.test", rotation + timedelta(minutes=2), first)
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            await public_key_fetch.signature_status(live, "https", ALONE, creator),
+            await public_key_fetch.signature_status(live, "https", creator),
             "a live identifier signed with the key before the current one verifies",
         )
         self.assertEqual(
@@ -738,17 +735,17 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         earlier = self._signed_at("creator.test", rotation - timedelta(days=3), first)
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            await public_key_fetch.signature_status(earlier, "https", ALONE, creator),
+            await public_key_fetch.signature_status(earlier, "https", creator),
             "the key answered with was not in force at the identifier's date",
         )
         self.assertFalse(
-            await public_key_fetch.verify(earlier, "https", ALONE, creator),
+            await public_key_fetch.verify(earlier, "https", creator),
             "the boolean form answers True for a genuine signature alone",
         )
         forged = self._signed_at("creator.test", rotation + timedelta(days=3), stranger)
         self.assertIs(
             SignatureStatus.SIGNATURE_INVALID,
-            await public_key_fetch.signature_status(forged, "https", ALONE, creator),
+            await public_key_fetch.signature_status(forged, "https", creator),
             "a signature failing under the key in force at its date does not match",
         )
 
@@ -773,7 +770,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.INVALID_KEY,
             await public_key_fetch._signature_status_at_url(
-                owid, end_point.url_for(owid), None, contradictory
+                owid, end_point.url_for(owid), contradictory
             ),
         )
 
@@ -795,7 +792,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(
             SignatureStatus.INVALID_KEY,
-            await public_key_fetch.signature_status(owid, "https", ALONE, creator),
+            await public_key_fetch.signature_status(owid, "https", creator),
         )
         self.assertEqual(["spki"], formats, "the request asks for spki by name")
 
@@ -806,7 +803,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            await public_key_fetch.signature_status(owid, "https", ALONE, unstated),
+            await public_key_fetch.signature_status(owid, "https", unstated),
         )
 
     def test_many_threads_verifying_one_owid_together_make_one_request(self) -> None:
@@ -835,7 +832,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             started.wait()
             statuses.append(
                 asyncio.run(
-                    public_key_fetch._signature_status_at_url(owid, url, None, transport)
+                    public_key_fetch._signature_status_at_url(owid, url, transport)
                 )
             )
 
@@ -889,7 +886,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             "one request for the URL the package builds, shared by both",
         )
         self.assertTrue(
-            await public_key_fetch.verify(owid, "https", ALONE, held_open),
+            await public_key_fetch.verify(owid, "https", held_open),
             "a later caller is answered from the cache",
         )
         self.assertEqual(1, len(calls), "the cache answered the third caller")
@@ -934,12 +931,12 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
 
         first = asyncio.ensure_future(
             public_key_fetch.signature_status(
-                owid, "https", ALONE, held_then_refused
+                owid, "https", held_then_refused
             )
         )
         second = asyncio.ensure_future(
             public_key_fetch.signature_status(
-                owid, "https", ALONE, held_then_refused
+                owid, "https", held_then_refused
             )
         )
         while not calls:
@@ -953,7 +950,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, held_then_refused
+                owid, "https", held_then_refused
             ),
         )
         self.assertEqual(
@@ -1010,7 +1007,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, no_request
+                owid, "https", no_request
             ),
         )
 
@@ -1025,7 +1022,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(url.startswith("file:"))
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
-            await public_key_fetch._signature_status_at_url(owid, url, ALONE),
+            await public_key_fetch._signature_status_at_url(owid, url),
         )
         with self.assertRaises(PublicKeyFetchError) as refused:
             await public_key_fetch._public_key_pem_at_url(url, owid.domain)
@@ -1062,11 +1059,11 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, transport
+                owid, "https", transport
             ),
         )
         self.assertTrue(
-            await public_key_fetch.verify(owid, "https", ALONE, transport)
+            await public_key_fetch.verify(owid, "https", transport)
         )
         self.assertEqual(
             [
@@ -1092,7 +1089,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
             return 200, endpoints.public_key_answer(following.public_key_pem, None, None, None).encode("utf-8")
 
         self.assertFalse(
-            await public_key_fetch.verify(owid, "https", ALONE, wrong_week),
+            await public_key_fetch.verify(owid, "https", wrong_week),
             "the following week's key did not sign the identifier",
         )
 
@@ -1108,13 +1105,13 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, unreachable
+                owid, "https", unreachable
             ),
         )
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, unusable
+                owid, "https", unusable
             ),
         )
 
@@ -1135,7 +1132,7 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             SignatureStatus.KEY_UNAVAILABLE,
             await public_key_fetch.signature_status(
-                owid, "https", ALONE, oversized
+                owid, "https", oversized
             ),
         )
 

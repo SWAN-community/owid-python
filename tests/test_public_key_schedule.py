@@ -28,21 +28,16 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from typing import List
 
 from owid import (
     Crypto,
     DatedPublicKey,
-    Owid,
     OwidError,
     PublicKeySchedule,
     SignatureStatus,
 )
 
 from tests import key_fixtures
-
-#: No other OWIDs were covered by the signature on the fixture.
-ALONE: List[Owid] = []
 
 
 def fresh_pem() -> str:
@@ -66,7 +61,7 @@ class PublicKeyScheduleTests(unittest.TestCase):
         self.assertEqual(1, len(week), "the schedule holds that week once")
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            owid.signature_status(week[0].pem, ALONE),
+            owid.signature_status(week[0].pem),
         )
 
     def test_schedule_verifies_the_genuine_identifier(self) -> None:
@@ -76,9 +71,9 @@ class PublicKeyScheduleTests(unittest.TestCase):
         self.assertIsNotNone(chosen)
         self.assertEqual(key_fixtures.WEEK_OF_THE_IDENTIFIER, chosen.starts_at)
         self.assertIs(
-            SignatureStatus.SIGNATURE_VALID, schedule.signature_status(owid, ALONE)
+            SignatureStatus.SIGNATURE_VALID, schedule.signature_status(owid)
         )
-        self.assertTrue(schedule.verify(owid, ALONE))
+        self.assertTrue(schedule.verify(owid))
 
     def test_a_later_weeks_key_does_not_verify_an_earlier_weeks_identifier(
         self,
@@ -94,7 +89,7 @@ class PublicKeyScheduleTests(unittest.TestCase):
         self.assertGreater(following.starts_at, owid.date)
         self.assertIs(
             SignatureStatus.SIGNATURE_INVALID,
-            owid.signature_status(following.public_key_pem, ALONE),
+            owid.signature_status(following.public_key_pem),
         )
 
     def test_the_last_key_is_not_the_key_in_force(self) -> None:
@@ -173,7 +168,7 @@ class PublicKeyScheduleTests(unittest.TestCase):
         )
         self.assertIs(
             SignatureStatus.SIGNATURE_INVALID,
-            owid.signature_status(newest_generated.pem, ALONE),
+            owid.signature_status(newest_generated.pem),
             "selecting on the generation moment reports a genuine identifier "
             "as not matching",
         )
@@ -186,7 +181,7 @@ class PublicKeyScheduleTests(unittest.TestCase):
         )
         self.assertIs(
             SignatureStatus.SIGNATURE_VALID,
-            owid.signature_status(chosen.public_key_pem, ALONE),
+            owid.signature_status(chosen.public_key_pem),
             "selecting on the start verifies the genuine identifier",
         )
 
