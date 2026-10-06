@@ -576,12 +576,25 @@ class PublicKeyFetchTests(unittest.IsolatedAsyncioTestCase):
         """The drift allowance, which keeps minutes near now out of a cache
         built from confirmed minutes, does not apply to a span the creator
         stated itself, so live identifiers cost one request per key rather
-        than one per minute."""
-        end_point = self.end_point()
-        now = datetime.now(timezone.utc)
-        current = key_fixtures.schedule().key_in_force(now)
-        if current is None or key_fixtures.schedule().next_start_after(current) is None:
-            self.skipTest("the fixture schedule has no key after the one in force now")
+        than one per minute.
+
+        The minutes asked about are read from the clock, and the stand in end
+        point answers from the schedule for no moment after its
+        REQUEST_MOMENT, so the creator here states one key for the day either
+        side of now instead."""
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        day = timedelta(days=1)
+        pem = key_fixtures.schedule().keys[0].public_key_pem
+        stated = endpoints.public_key_answer(pem, now - day, now + day, None)
+
+        class OneKey(KeyEndPoint):
+            def body(
+                self, date: Optional[str], format: Optional[str]
+            ) -> Optional[str]:
+                return stated
+
+        end_point = OneKey()
+        self.started.append(end_point)
         await self._pem_at(end_point, now - timedelta(minutes=1))
         await self._pem_at(end_point, now)
         await self._pem_at(end_point, now - timedelta(minutes=10))
